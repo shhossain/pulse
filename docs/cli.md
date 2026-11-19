@@ -285,6 +285,10 @@ usage:
   pulse remote enable --tunnel <https-url> [--addr 127.0.0.1:<port>]
                                        accept them through a tunnel (e.g. Cloudflare Tunnel) that
                                        forwards <https-url> to a loopback port (default 127.0.0.1:7778)
+  pulse remote web --team <team>.cloudflareaccess.com --aud <tag> --email <you@…> [--email …]
+                                       open the read-only web UI through the tunnel to these
+                                       people, signed in by Cloudflare Access (checked by Pulse)
+  pulse remote web off
   pulse remote disable
   pulse remote token <job> [--name x]  create a token that can only report <job> (shown once)
   pulse remote tokens                  list tokens (never their values)

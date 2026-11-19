@@ -114,6 +114,7 @@ func TestTunnelURLValidation(t *testing.T) {
 		"https://pulse.example.com/":     "https://pulse.example.com",
 		"https://pulse.example.com:8443": "https://pulse.example.com:8443",
 		"https://Pulse.Example.com":      "https://pulse.example.com",
+		"https://pulse.example.com:443":  "https://pulse.example.com", // as browsers write the origin
 	} {
 		if got, err := tunnelURL(raw); err != nil || got != want {
 			t.Errorf("tunnelURL(%q) = %q, %v; want %q", raw, got, err, want)

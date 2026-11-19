@@ -1,6 +1,6 @@
 <script>
   import { summary, ago, duration, statusTip } from '../lib/format.js'
-  import { act, openPage } from '../lib/live.svelte.js'
+  import { act, openPage, session } from '../lib/live.svelte.js'
 
   let { run, now } = $props()
   const took = $derived(run.ended_at ? duration(Date.parse(run.ended_at) - Date.parse(run.started_at)) : '')
@@ -18,7 +18,7 @@
       {run.status === 'idle' ? 'idle' : run.status}{took ? ` in ${took}` : ''}{summary(run) ? ` · ${summary(run)}` : ''}
     </div>
   </div>
-  <button class="x" aria-label="Hide" data-tip="Hide from this list (the run stays in history)" onclick={(e) => { e.stopPropagation(); act(run.id, 'archive') }}>×</button>
+  {#if !session.readOnly}<button class="x" aria-label="Hide" data-tip="Hide from this list (the run stays in history)" onclick={(e) => { e.stopPropagation(); act(run.id, 'archive') }}>×</button>{/if}
 </div>
 
 <style>

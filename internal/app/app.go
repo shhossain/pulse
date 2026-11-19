@@ -230,6 +230,15 @@ func (s *SwitchNotifier) Notify(n model.Notification) {
 	}
 }
 
+// Notifiers sends each notification to all of them.
+type Notifiers []engine.Notifier
+
+func (ns Notifiers) Notify(n model.Notification) {
+	for _, x := range ns {
+		x.Notify(n)
+	}
+}
+
 // LogNotifier writes notifications to the log.
 type LogNotifier struct{}
 

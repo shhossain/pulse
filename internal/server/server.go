@@ -63,15 +63,18 @@ type Server struct {
 	sessionTok string
 
 	mu      sync.Mutex
+	cfgMu   sync.Mutex   // serializes changes to remote.json (remote access, web UI)
 	tokMu   sync.RWMutex // guards pushTok/adminTok (rotation)
 	oneTime map[string]time.Time
 	subs    map[chan struct{}]struct{} // SSE subscribers
 	remote  *remoteState
 
-	ui   fs.FS
-	ln   net.Listener
-	port int
-	lim  *limiter
+	ui     fs.FS
+	ln     net.Listener
+	port   int
+	lim    *limiter
+	web    *webAccess // the web UI through the tunnel (nil: off); guarded by mu
+	pusher *pusher    // web push to viewers, loaded on first use; guarded by mu
 }
 
 func New(eng *engine.Engine, pushToken, adminToken string) *Server {
@@ -190,6 +193,10 @@ func (s *Server) Handler() http.Handler {
 	api("DELETE /watches", s.require(scopeAdmin, s.removeWatch))
 	api("GET /remote", s.require(scopeAdmin, s.remoteStatus))
 	api("POST /remote", s.require(scopeAdmin, s.setRemote))
+	api("POST /remote/web", s.require(scopeAdmin, s.setWeb))
+	api("GET /session", s.require(scopeAdmin, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"remote": false, "read_only": false})
+	}))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/popover", http.StatusFound)
 	})
@@ -198,6 +205,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /r/{id}", s.requireUI(s.page("run.html")))
 	mux.HandleFunc("GET /j/{job...}", s.requireUI(s.jobPage))
 	mux.Handle("GET /assets/", s.assets())
+	mux.HandleFunc("GET /pwa/{file}", func(w http.ResponseWriter, r *http.Request) {
+		if !s.servePublic(w, r) {
+			http.NotFound(w, r)
+		}
+	})
 	return s.guard(mux)
 }
 

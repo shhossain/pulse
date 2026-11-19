@@ -33,18 +33,37 @@ func (s *Server) pushRoutes(api func(string, http.HandlerFunc)) {
 
 // RemoteHandler serves other machines: push routes only, push-scope tokens
 // only (the admin token is refused even if it leaks), and no browsers.
-func (s *Server) RemoteHandler() http.Handler { return s.remoteHandler(false) }
+func (s *Server) RemoteHandler() http.Handler { return s.remoteHandler("") }
 
-// remoteHandler is RemoteHandler; in tunnel mode (reachable from the
-// internet) only job tokens work: this machine's own push token, which may
-// report any job without limits, stays on private networks.
-func (s *Server) remoteHandler(tunnel bool) http.Handler {
+// remoteHandler is RemoteHandler; in tunnel mode (publicURL set: reachable
+// from the internet) only job tokens work: this machine's own push token,
+// which may report any job without limits, stays on private networks. With
+// the web UI on, a person Cloudflare Access signed in (and Pulse verified)
+// gets the read-only UI instead.
+func (s *Server) remoteHandler(publicURL string) http.Handler {
+	tunnel := publicURL != ""
+	viewer := s.viewerHandler(publicURL)
 	mux := http.NewServeMux()
 	s.pushRoutes(func(pattern string, h http.HandlerFunc) {
 		method, path, _ := strings.Cut(pattern, " ")
 		mux.HandleFunc(method+" /api/v1"+path, h)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A job machine sends its job token; a person's browser never does.
+		// (Someone's own Access login on a job machine must not turn its
+		// pushes into read-only UI requests.)
+		if wa := s.webAccess(); tunnel && wa != nil && s.servePublic(w, r) {
+			return
+		}
+		if wa := s.webAccess(); tunnel && wa != nil && r.Header.Get("Authorization") == "" {
+			if email, ok := wa.viewer(r); ok {
+				ctx, cancel := context.WithCancel(context.WithValue(r.Context(), viewerKey, email))
+				defer cancel()
+				go s.revokeWhenAccessEnds(ctx, cancel, wa, r)
+				viewer.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+		}
 		if r.Header.Get("Origin") != "" || hasForeignCookie(r) {
 			writeErr(w, http.StatusForbidden, "browsers can't use the remote endpoint")
 			return
@@ -96,6 +115,8 @@ type RemoteConfig struct {
 	// PublicURL is set in tunnel mode: the listener binds to loopback only
 	// and a tunnel (e.g. cloudflared) forwards this https URL to it.
 	PublicURL string `json:"public_url,omitempty"`
+	// Web opens the read-only UI through the tunnel to signed-in viewers.
+	Web *WebConfig `json:"web,omitempty"`
 }
 
 func remoteFile() string { return filepath.Join(paths.Home(), "remote.json") }
@@ -150,7 +171,9 @@ func tunnelURL(raw string) (string, error) {
 		if err != nil || n < 1 || n > 65535 {
 			return "", bad
 		}
-		host = net.JoinHostPort(host, p)
+		if n != 443 { // the default: browsers leave it out of Origin
+			host = net.JoinHostPort(host, p)
+		}
 	}
 	return "https://" + host, nil
 }
@@ -228,6 +251,21 @@ type remoteState struct {
 // StartRemote applies the saved remote config (called at startup).
 func (s *Server) StartRemote() {
 	if c := loadRemote(); c.Enabled {
+		if c.PublicURL != "" { // saved by an older version: normalize as it would be now
+			u, err := tunnelURL(c.PublicURL)
+			if err != nil {
+				log.Printf("remote: saved tunnel URL: %v", err)
+				return
+			}
+			c.PublicURL = u
+		}
+		if c.Web != nil && c.PublicURL != "" {
+			if cfg, err := validWeb(*c.Web); err == nil {
+				s.mu.Lock()
+				s.web = newWebAccess(cfg)
+				s.mu.Unlock()
+			}
+		}
 		if err := s.listenRemote(c.Addr, c.PublicURL); err != nil {
 			log.Printf("remote: %v", err)
 		}
@@ -260,7 +298,7 @@ func (s *Server) listenRemote(addr, publicURL string) error {
 		s.mu.Unlock()
 		return err
 	}
-	srv := &http.Server{Handler: s.remoteHandler(publicURL != ""), ReadHeaderTimeout: 10 * time.Second,
+	srv := &http.Server{Handler: s.remoteHandler(publicURL), ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes: 64 << 10}
 	s.mu.Lock()
 	s.remote = &remoteState{srv: srv, addr: ln.Addr().String(), publicURL: publicURL}
@@ -282,7 +320,9 @@ func (s *Server) stopRemote() {
 	if r != nil && r.srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_ = r.srv.Shutdown(ctx)
+		if err := r.srv.Shutdown(ctx); err != nil {
+			_ = r.srv.Close() // streams never finish on their own
+		}
 	}
 }
 
@@ -291,6 +331,7 @@ type remoteView struct {
 	URL        string      `json:"url,omitempty"`    // what other machines use (PULSE_URL)
 	Listen     string      `json:"listen,omitempty"` // where the listener is bound
 	Tunnel     bool        `json:"tunnel,omitempty"`
+	Web        *WebConfig  `json:"web,omitempty"` // the read-only web UI, when on
 	Error      string      `json:"error,omitempty"`
 	Candidates []Candidate `json:"candidates"`
 }
@@ -302,6 +343,10 @@ func (s *Server) remoteView() remoteView {
 	if s.remote != nil {
 		v.Enabled = s.remote.srv != nil
 		v.Error = s.remote.err
+		if s.web != nil {
+			cfg := s.web.cfg
+			v.Web = &cfg
+		}
 		if v.Enabled {
 			v.Listen = s.remote.addr
 			v.URL = "http://" + s.remote.addr
@@ -321,6 +366,8 @@ func (s *Server) remoteStatus(w http.ResponseWriter, r *http.Request) { writeJSO
 // setRemote turns the remote listener on (on addr, default: the Tailscale
 // address and this app's port) or off.
 func (s *Server) setRemote(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 	var in struct {
 		Enable    bool   `json:"enable"`
 		Addr      string `json:"addr"`
@@ -332,6 +379,9 @@ func (s *Server) setRemote(w http.ResponseWriter, r *http.Request) {
 	}
 	if !in.Enable {
 		s.stopRemote()
+		s.mu.Lock()
+		s.web = nil
+		s.mu.Unlock()
 		_ = saveRemote(RemoteConfig{})
 		audit.Log("remote.disabled", nil)
 		writeJSON(w, s.remoteView())
@@ -357,11 +407,22 @@ func (s *Server) setRemote(w http.ResponseWriter, r *http.Request) {
 	} else if h, p, err := net.SplitHostPort(addr); err == nil && p == "" {
 		addr = net.JoinHostPort(h, fmt.Sprint(s.port))
 	}
+	saved := RemoteConfig{Enabled: true, Addr: addr, PublicURL: publicURL}
+	if prev := loadRemote(); prev.Web != nil && prev.PublicURL == publicURL && publicURL != "" {
+		saved.Web = prev.Web // same tunnel: keep who may look
+	} else {
+		s.mu.Lock()
+		s.web = nil // before the new listener starts: no viewer on another origin
+		s.mu.Unlock()
+	}
 	if err := s.listenRemote(addr, publicURL); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_ = saveRemote(RemoteConfig{Enabled: true, Addr: addr, PublicURL: publicURL})
+	if err := saveRemote(saved); err != nil {
+		writeErr(w, http.StatusInternalServerError, "remote access is on but couldn't be saved: "+err.Error())
+		return
+	}
 	audit.Log("remote.enabled", map[string]any{"addr": addr, "public_url": publicURL})
 	writeJSON(w, s.remoteView())
 }

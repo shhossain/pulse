@@ -47,7 +47,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer a.Close()
-	a.Notifier.Set(app.LogNotifier{})
+	a.Notifier.Set(app.Notifiers{app.LogNotifier{}, a.Srv.PushNotifier()}) // the log, and viewers' phones
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)

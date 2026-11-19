@@ -180,7 +180,7 @@ func TestJobTokenAsksPerHour(t *testing.T) {
 
 func TestTunnelRefusesTheMachinePushToken(t *testing.T) {
 	s := start(t)
-	remote := httptest.NewServer(s.remoteHandler(true))
+	remote := httptest.NewServer(s.remoteHandler("https://pulse.example.com"))
 	defer remote.Close()
 	tok, _, _ := s.eng.CreateToken("ci", "")
 	if r := do(t, "POST", remote.URL+"/api/v1/push/ci", pushTok, `{}`); r.StatusCode != 403 {
