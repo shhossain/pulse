@@ -12,6 +12,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import __version__ as _VERSION
+
 _FLUSH_EVERY = 0.25
 _HEARTBEAT_EVERY = 10.0
 _MAX_PENDING = 20000
@@ -84,6 +86,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _why(e):
+    """A short reason for an error reaching Pulse, with the fix when known."""
+    reason = getattr(e, "reason", None)
+    text = str(reason if reason is not None else e)
+    if "CERTIFICATE_VERIFY_FAILED" in text:
+        return ("this Python can't verify HTTPS certificates: run 'Install Certificates.command' "
+                "(python.org installer) or set SSL_CERT_FILE to a CA bundle")
+    return e.__class__.__name__ + (": " + text if text else "")
 
 
 def _intercepted(e):
@@ -203,6 +215,9 @@ class _Client:
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.url + path, data=data, method=method)
         req.add_header("Content-Type", "application/json")
+        # A name of its own: proxies such as Cloudflare refuse Python's default
+        # "Python-urllib" as a bot.
+        req.add_header("User-Agent", "pulse-python/%s" % _VERSION)
         if self.token:
             req.add_header("Authorization", "Bearer " + self.token)
         problem = _access_problem(self.url)
@@ -244,7 +259,7 @@ class _Client:
             self._warn("Pulse rejected an update (HTTP %d)" % e.code)
             return False
         except Exception as e:
-            self._warn("can't reach Pulse (%s)" % e.__class__.__name__)
+            self._warn("can't reach Pulse (%s)" % _why(e))
             return False
         with self.lock:
             del self.pending[: len(batch)]

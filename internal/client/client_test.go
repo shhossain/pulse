@@ -137,6 +137,9 @@ func TestInterceptedResponses(t *testing.T) {
 	if got.Get("Cf-Access-Client-Id") != "x" {
 		t.Errorf("extra header not sent: %v", got)
 	}
+	if !strings.HasPrefix(got.Get("User-Agent"), "pulse") {
+		t.Errorf("User-Agent %q: proxies like Cloudflare block unnamed library clients", got.Get("User-Agent"))
+	}
 	if err := c.Do(ctx, "POST", "/api/v1/cf403", nil, nil); !errors.As(err, &apiErr) || !apiErr.Intercepted || !strings.Contains(apiErr.Msg, "Cloudflare refused") {
 		t.Errorf("Cloudflare 403: %v", err)
 	}
