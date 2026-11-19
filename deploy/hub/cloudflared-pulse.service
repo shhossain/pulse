@@ -1,0 +1,28 @@
+# cloudflared connector for the Pulse hub, sandboxed as its own user.
+[Unit]
+Description=Cloudflare Tunnel for the Pulse hub
+After=network-online.target pulse-hub.service
+Wants=network-online.target
+
+[Service]
+User=cloudflared
+Group=cloudflared
+ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/pulse-hub.yml tunnel run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

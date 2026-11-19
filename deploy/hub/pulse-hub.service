@@ -1,0 +1,46 @@
+# Pulse hub: the Pulse engine without a UI, on an always-on Linux server.
+# Install: see deploy/hub/README.md.
+[Unit]
+Description=Pulse hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pulse
+Group=pulse
+Environment=PULSE_HOME=/var/lib/pulse
+ExecStart=/usr/local/bin/pulse-hub --addr 127.0.0.1:7777
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+# Sandbox: Pulse needs its data folder, loopback/outbound network, nothing else.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pulse
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=400M
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

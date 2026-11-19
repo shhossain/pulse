@@ -15,7 +15,7 @@ pulse watch ingest --cmd 'aws s3 cp s3://bucket/progress.json -'
 - **Zero setup.** `pulse run` reads tqdm bars, `epoch 3/10`, `loss=0.43`, JSON lines and Hugging Face
   Trainer logs. Jobs appear on first report; charts, alerts and ETAs are inferred. It also records
   what the job uses: CPU and memory, GPU (NVIDIA or Apple Silicon) and free disk.
-- **Menubar first.** A progress ring in the menubar, a popover with every running job, a page per run
+- **Menubar first.** A progress ring per running job in the menubar (up to three, nested), a popover with every running job, a page per run
   with live charts, run comparison and the log tail.
 - **Notifications that matter.** Finished, failed, lost, stuck, NaN, disk almost full, plus your own rules
   (`val_loss new min`, `eta < 5m`, `no update for 15m`). Stop, mute or answer right from the notification.
@@ -36,7 +36,12 @@ pulse doctor
 ```
 
 If a release isn't notarized yet, open it the first time with right-click → **Open**.
-Linux machines that report to a Mac use the `pulse_<version>_linux_<arch>.tar.gz` archives.
+On Linux machines that report to a Mac or a hub, install the CLI with one line (verified against the
+release's SHA256SUMS; installs to `/usr/local/bin`, or `~/.local/bin` without root):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shhossain/pulse/main/install.sh | sh
+```
 
 ### From source
 

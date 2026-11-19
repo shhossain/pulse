@@ -8,6 +8,51 @@ SameSite=Strict cookie. Remote access is off by default; when on, it binds only 
 private-network address (never `0.0.0.0` or a public IP), serves only push routes, refuses the admin
 token and refuses browsers.
 
+**Hub behind a tunnel (opt-in).** `pulse-hub` runs the same engine without a UI on an always-on
+server, for jobs that must report while your Mac sleeps (see [deploy/hub](../deploy/hub/README.md)).
+`pulse remote enable --tunnel https://<host>` binds the push listener to loopback only and accepts
+only an https public URL; a tunnel (cloudflared) is the only way in. This is the one setup where
+Pulse is reachable from the internet, so it changes the trust model:
+
+- *Two gates.* Cloudflare Access (a service token for job machines) refuses everything else at
+  Cloudflare's edge; behind it, Pulse still requires a job token and still serves only the push
+  routes. The admin API and UI are never routed through the tunnel; administer the hub over SSH.
+- *Who can see data.* Cloudflare terminates TLS, so it sees job names, numbers and log lines in
+  transit. The hub's provider can read what's stored on its disk. Don't send logs that hold secrets.
+- *Reference deployment* (deploy/hub): no inbound ports or public IPv4 (SSH only through the cloud
+  provider's identity-aware proxy), no cloud credentials on the VM, Pulse and cloudflared as separate
+  unprivileged, sandboxed systemd services, automatic security updates.
+- Clients never follow redirects and keep their data when a proxy (not Pulse) refuses a request, so
+  an expired Access token delays reports instead of losing them.
+
+**A compromised job machine.** Assume any machine running a job can be taken over. With its job token
+(and its Access service token) an attacker can report anything *about that one job*: fake progress,
+mark it done, ignore Stop, ask questions in your name. They can't read anything back (there are no
+read routes for job tokens), touch other jobs, change alerts or actions, run commands on the hub,
+or reach your other machines: the hub never connects to job machines; they fetch their commands.
+Per-token limits keep the damage inside that job. A job over a limit is slowed down, never cut off
+from what keeps its runs honest (status, Stop, answers):
+
+| Limit (per job token) | Default | Over it |
+|---|---|---|
+| data requests (events, pushes) | 50/s, bursts of 200 | HTTP 429 with `Retry-After` |
+| control requests (waiting for Stop or answers, acks) | 10/s, bursts of 50, a separate budget | 429 |
+| data sent, body and URL (everything stored) | 2 GB a rolling day | degraded: log lines dropped, 1 request/s of at most 16 KB |
+| new runs | 120 an hour | 429 |
+| questions | 20 an hour | 429; the asker waits for room rather than taking its default |
+| notifications, per job (any source, questions aside) | 30 an hour | one "too many" notice, then held for the hour |
+
+Limits apply to job tokens only; this machine's own tokens are trusted, and through a tunnel only
+job tokens are accepted at all. The first time in an hour a job hits a limit, it's written to
+`audit.log` (`limit.exceeded`) and you get a notification. Clients keep their data on a 429 and retry.
+Job-supplied text (names, log lines, questions, notifications) is only ever shown as text, never as
+HTML or a link.
+
+If you suspect a job machine: revoke its job token (`pulse remote tokens`, `pulse remote revoke <id>`)
+and, behind Cloudflare Access, its service token (Zero Trust → Access → Service auth); give each machine
+its own so revoking one leaves the others working. Then delete what it sent if you don't trust it
+(`pulse rm <job>`) and check `audit.log` for `limit.exceeded` and token use.
+
 **Tokens.** `admin.token` and `push.token` live in the data folder with mode 0600. Job tokens can only
 report one job; only their SHA-256 is stored and the value is shown once. `pulse remote rotate` replaces
 the local tokens. The CLI never sends local tokens to a non-loopback `PULSE_URL`.

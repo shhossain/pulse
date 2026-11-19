@@ -377,8 +377,8 @@ func (e *Engine) PushFrom(job string, raw map[string]any, forceNew bool, source 
 	name := CleanJobName(job)
 	r := e.runs[e.latest[name]]
 	var notes []model.Notification
-	if r != nil && !forceNew && r.Status.Terminal() && repeatsEnd(ev, r.Status) &&
-		r.EndedAt != nil && now.Sub(*r.EndedAt) < 2*time.Minute {
+	repeat, fresh := pushTarget(r, ev, forceNew, now)
+	if repeat {
 		// "status=done" sent again right away (a retry): the run is already
 		// done; don't start a new one or notify twice. Later it's a new run
 		// (a cron job that reports only its outcome).
@@ -386,8 +386,7 @@ func (e *Engine) PushFrom(job string, raw map[string]any, forceNew bool, source 
 		e.mu.Unlock()
 		return resp, nil
 	}
-	if r == nil || forceNew || r.Status.Terminal() || r.Status == model.Lost ||
-		(ev.Step != nil && r.Step != nil && *ev.Step < *r.Step) {
+	if fresh {
 		prev := r
 		r = e.newRun(NewRunID(), name, model.RunMeta{Source: source}, now)
 		// A push job has one current run: close the one being replaced so
@@ -412,6 +411,28 @@ func (e *Engine) PushFrom(job string, raw map[string]any, forceNew bool, source 
 
 	e.emit(notes, true)
 	return resp, nil
+}
+
+// pushTarget decides what a push does to its job's latest run r: repeat
+// (a retried "done" for a run that just ended: ignore it) or fresh (start a
+// new run); otherwise the push updates r.
+func pushTarget(r *model.Run, ev model.Event, forceNew bool, now time.Time) (repeat, fresh bool) {
+	if r != nil && !forceNew && r.Status.Terminal() && repeatsEnd(ev, r.Status) &&
+		r.EndedAt != nil && now.Sub(*r.EndedAt) < 2*time.Minute {
+		return true, false
+	}
+	return false, r == nil || forceNew || r.Status.Terminal() || r.Status == model.Lost ||
+		(ev.Step != nil && r.Step != nil && *ev.Step < *r.Step)
+}
+
+// PushStartsRun reports whether pushing raw to job now would start a new run
+// (to limit how fast a job token can create them).
+func (e *Engine) PushStartsRun(job string, raw map[string]any, forceNew bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.now()
+	_, fresh := pushTarget(e.runs[e.latest[CleanJobName(job)]], normalize.Normalize(raw, now), forceNew, now)
+	return fresh
 }
 
 func contains(list []string, s string) bool {

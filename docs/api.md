@@ -11,8 +11,15 @@ The app listens on `http://127.0.0.1:7777` (another free port if that's taken; s
 | job token (`pulse remote token <job>`) | anywhere | the same, for one job only |
 
 Requests with a non-loopback `Host` or a foreign `Origin` are refused. The optional remote listener
-(`pulse remote enable`) binds only to a Tailscale or private-network address and serves only the
-*push* routes below; the admin token is refused there.
+(`pulse remote enable`) binds only to a Tailscale or private-network address (or, with `--tunnel`,
+to loopback behind a tunnel) and serves only the *push* routes below; the admin token is refused
+there. Clients send a Cloudflare Access service token (`CF-Access-Client-Id` /
+`CF-Access-Client-Secret`) when `PULSE_CF_ACCESS_CLIENT_ID` / `_SECRET` are set.
+
+Job tokens are limited (request rates, data per day, new runs and questions per hour; see
+[security.md](security.md)). Over a limit the answer is `429` with `Retry-After`: send the data again
+later, don't drop it. Over the daily data quota, log lines in a batch are dropped and only small
+requests are accepted. Through a tunnel (`pulse remote enable --tunnel`) only job tokens work.
 
 ## Push routes
 

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run the pulse CLI against this server's hub, as the hub's user.
+# Usage: pulse-admin ls | pulse-admin remote token <job> | ...
+exec sudo -u pulse env PULSE_HOME=/var/lib/pulse /usr/local/bin/pulse "$@"

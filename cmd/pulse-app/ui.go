@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
+	"pulse/internal/app"
 	"pulse/internal/engine"
 	"pulse/internal/model"
 	"pulse/internal/server"
@@ -21,7 +23,7 @@ import (
 )
 
 // runUI starts the menubar UI and blocks until the app quits.
-func runUI(eng *engine.Engine, srv *server.Server, notifier *switchNotifier) {
+func runUI(eng *engine.Engine, srv *server.Server, notifier *app.SwitchNotifier) {
 	ns := notifications.New()
 	app := application.New(application.Options{
 		Name:        "Pulse",
@@ -97,7 +99,7 @@ func runUI(eng *engine.Engine, srv *server.Server, notifier *switchNotifier) {
 	}
 
 	wn := &wailsNotifier{ns: ns}
-	notifier.set(wn)
+	notifier.Set(wn)
 	ns.OnNotificationResponse(func(res notifications.NotificationResult) {
 		if res.Error != nil {
 			log.Printf("notification response: %v", res.Error)
@@ -149,16 +151,16 @@ func runUI(eng *engine.Engine, srv *server.Server, notifier *switchNotifier) {
 	})
 	go func() {
 		var lastLabel string
-		lastFrac, lastBadge := -2.0, false
+		lastFracs, lastBadge := []float64{-2}, false
 		for {
-			label, frac, badge := traySummary(eng.Snapshot())
+			label, fracs, badge := traySummary(eng.Snapshot())
 			if label != lastLabel {
 				tray.SetLabel(label)
 				lastLabel = label
 			}
-			if math.Abs(frac-lastFrac) >= 0.005 || badge != lastBadge {
-				tray.SetTemplateIcon(trayicon.Ring(frac, badge))
-				lastFrac, lastBadge = frac, badge
+			if ringsMoved(fracs, lastFracs) || badge != lastBadge {
+				tray.SetTemplateIcon(trayicon.Rings(fracs, badge))
+				lastFracs, lastBadge = fracs, badge
 			}
 			<-dirty
 			time.Sleep(300 * time.Millisecond)
@@ -170,13 +172,18 @@ func runUI(eng *engine.Engine, srv *server.Server, notifier *switchNotifier) {
 	}
 }
 
-// traySummary picks what the menubar shows: the most-progressed running run
-// as a ring + "62%"; a count when several run without progress; else idle.
-// badge is true while a failed/lost run is waiting in "Needs you".
-func traySummary(runs []model.Run) (label string, frac float64, badge bool) {
+// traySummary picks what the menubar shows. Running runs with progress get
+// a ring each, the furthest along outermost; with more than fit, the ones
+// furthest behind are kept. The label is the furthest-behind run's percent
+// (when everything is done), followed by "·N" when N runs are going. Runs
+// without progress count toward N but have no ring; when none has progress
+// the icon is an empty ring, labeled "N▶" when several run. No running runs
+// is the idle ring (fracs nil). badge is true while a failed/lost run is
+// waiting in "Needs you".
+func traySummary(runs []model.Run) (label string, fracs []float64, badge bool) {
 	running := 0
-	best := -1.0
-	for _, r := range runs {
+	for i := range runs {
+		r := &runs[i]
 		if r.NeedsAttention() {
 			badge = true
 		}
@@ -184,21 +191,42 @@ func traySummary(runs []model.Run) (label string, frac float64, badge bool) {
 			continue
 		}
 		running++
-		if p, ok := r.Primary(); ok && p.Frac() > best {
-			best = p.Frac()
+		if p, ok := r.Primary(); ok {
+			fracs = append(fracs, p.Frac())
 		}
 	}
 	switch {
 	case running == 0:
-		label, frac = "", -1
-	case best >= 0:
-		label, frac = fmt.Sprintf("%d%%", int(best*100)), best
-	case running == 1:
-		label, frac = "", 0
-	default:
-		label, frac = fmt.Sprintf("%d▶", running), 0
+		return "", nil, badge
+	case len(fracs) == 0 && running == 1:
+		return "", []float64{0}, badge
+	case len(fracs) == 0:
+		return fmt.Sprintf("%d▶", running), []float64{0}, badge
 	}
-	return label, frac, badge
+	slices.Sort(fracs)
+	if len(fracs) > trayicon.MaxRings {
+		fracs = fracs[:trayicon.MaxRings]
+	}
+	label = fmt.Sprintf("%d%%", int(math.Floor(fracs[0]*100+1e-9))) // 0.29*100 is 28.999…
+	if running > 1 {
+		label += fmt.Sprintf("·%d", running)
+	}
+	slices.Reverse(fracs) // outermost first
+	return label, fracs, badge
+}
+
+// ringsMoved reports whether the icon for fracs looks different from the one
+// for last: a ring was added or removed, or one moved by at least half a percent.
+func ringsMoved(fracs, last []float64) bool {
+	if len(fracs) != len(last) {
+		return true
+	}
+	for i := range fracs {
+		if math.Abs(fracs[i]-last[i]) >= 0.005 {
+			return true
+		}
+	}
+	return false
 }
 
 func logIf(err error) {

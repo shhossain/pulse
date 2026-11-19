@@ -51,6 +51,11 @@ type Server struct {
 	OpenPage func(path string) error
 	// Watches runs polled sources (nil: watching is unavailable).
 	Watches *watch.Manager
+	// Limits bound what each job token may do (see Limits).
+	Limits Limits
+	// OnLimit is told when a job token first hits a limit in an hour (the
+	// app turns it into a notification: it may mean a compromised machine).
+	OnLimit func(job, what string)
 
 	eng        *engine.Engine
 	pushTok    string
@@ -66,6 +71,7 @@ type Server struct {
 	ui   fs.FS
 	ln   net.Listener
 	port int
+	lim  *limiter
 }
 
 func New(eng *engine.Engine, pushToken, adminToken string) *Server {
@@ -79,6 +85,13 @@ func New(eng *engine.Engine, pushToken, adminToken string) *Server {
 		oneTime:    map[string]time.Time{},
 		subs:       map[chan struct{}]struct{}{},
 		ui:         ui,
+		Limits:     DefaultLimits,
+		lim:        newLimiter(),
+	}
+	s.lim.onTrip = func(job, what string) {
+		if s.OnLimit != nil {
+			s.OnLimit(job, what)
+		}
 	}
 	s.OpenPage = s.openInBrowser
 	eng.OnChange(s.broadcast)
@@ -254,7 +267,10 @@ func (s *Server) scopeOf(r *http.Request) (scope, string) {
 
 type ctxKey int
 
-const jobLimitKey ctxKey = 1
+const (
+	jobLimitKey ctxKey = iota + 1
+	admissionKey
+)
 
 // jobLimit is the only job a job-scoped token may touch ("" = any).
 func jobLimit(r *http.Request) string {
@@ -286,11 +302,32 @@ func (s *Server) require(min scope, h http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusForbidden, "token does not allow this")
 			return
 		}
-		if job != "" {
-			r = r.WithContext(context.WithValue(r.Context(), jobLimitKey, job))
+		if job == "" {
+			h(w, r)
+			return
 		}
-		h(w, r)
+		// A job token: within its job's limits only. Everything it sends
+		// counts, the URL included (push reads values from the query).
+		control := r.Method == http.MethodGet || strings.HasSuffix(r.URL.Path, "/ack")
+		reserve := int64(len(r.URL.RawQuery)) + max(r.ContentLength, 0)
+		adm, e := s.lim.admit(job, s.Limits, control, reserve)
+		if e != nil {
+			refuse(w, e)
+			return
+		}
+		body := &countingBody{ReadCloser: r.Body}
+		r.Body = body
+		ctx := context.WithValue(r.Context(), jobLimitKey, job)
+		ctx = context.WithValue(ctx, admissionKey, adm)
+		h(w, r.WithContext(ctx))
+		s.lim.addBytes(job, body.n-max(r.ContentLength, 0)) // a body without a declared length
 	}
+}
+
+// admissionOf is what the job-token limits allow this request ("" for others).
+func admissionOf(r *http.Request) admission {
+	a, _ := r.Context().Value(admissionKey).(admission)
+	return a
 }
 
 func (s *Server) requireUI(h http.HandlerFunc) http.HandlerFunc {
@@ -467,8 +504,18 @@ func (s *Server) runEvents(w http.ResponseWriter, r *http.Request) {
 		if !allowJob(w, r, engine.CleanJobName(b.Job)) {
 			return
 		}
-		if existing := s.eng.RunJob(r.PathValue("id")); existing != "" && !allowJob(w, r, existing) {
+		existing := s.eng.RunJob(r.PathValue("id"))
+		if existing != "" && !allowJob(w, r, existing) {
 			return
+		}
+		if admissionOf(r).degraded && len(b.Log) > 0 {
+			b.Log = nil // over the daily data quota: status and metrics only
+		}
+		if existing == "" && engine.ValidRunID(r.PathValue("id")) {
+			if e := s.lim.newRun(lim, s.Limits); e != nil {
+				refuse(w, e)
+				return
+			}
 		}
 	}
 	resp, err := s.eng.ApplyBatch(r.PathValue("id"), b)
@@ -520,6 +567,12 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		raw[k] = v[len(v)-1]
+	}
+	if lim := jobLimit(r); lim != "" && s.eng.PushStartsRun(job, raw, forceNew) {
+		if e := s.lim.newRun(lim, s.Limits); e != nil {
+			refuse(w, e)
+			return
+		}
 	}
 	resp, err := s.eng.Push(job, raw, forceNew)
 	if err != nil {
@@ -974,6 +1027,12 @@ func (s *Server) createAsk(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !allowJob(w, r, s.eng.RunJob(id)) {
 		return
+	}
+	if lim := jobLimit(r); lim != "" {
+		if e := s.lim.ask(lim, s.Limits); e != nil {
+			refuse(w, e)
+			return
+		}
 	}
 	var in struct {
 		Question string   `json:"question"`
