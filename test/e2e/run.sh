@@ -21,6 +21,14 @@ expect() { # expect <name> <actual> <regex>
 field() { # field <job> <python expr on run dict r>
   "$P" show "$1" --json 2>/dev/null | python3 -c "import json,sys; r=json.load(sys.stdin); print($2)" 2>/dev/null
 }
+until_ok() { # until_ok <seconds> <command…>: retry until it succeeds (CI machines are slow)
+  local deadline=$((SECONDS + $1)); shift
+  until "$@" > /dev/null 2>&1; do
+    [ $SECONDS -ge $deadline ] && return 1
+    sleep 0.5
+  done
+}
+hp_question() { "$P" inbox --json | python3 -c "import json,sys; print([a['id'] for a in json.load(sys.stdin) if a['job']=='hp'][0])"; }
 
 echo "Building…"
 (cd "$ROOT" && go build -o "$P" ./cmd/pulse && go build -o "$BIN/pulse-app" ./cmd/pulse-app) 2>&1 | grep -v "ld: warning" | grep -v "^# pulse" && exit 1
@@ -103,9 +111,10 @@ print("answer:", pulse.ask("OK?", ["go", "stop"], timeout="1m"), "pings:", len(h
 PY
 "$P" action hp ping --send ping > /dev/null
 PYTHONPATH="$ROOT/sdk/python/src" "$P" run -n hp -- python3 helper.py > helper.out 2>&1 & RUN=$!
-sleep 2; "$P" do hp ping > /dev/null; sleep 2
-QID=$("$P" inbox --json | python3 -c "import json,sys; print([a['id'] for a in json.load(sys.stdin) if a['job']=='hp'][0])" 2>/dev/null)
-"$P" answer "$QID" go > /dev/null 2>&1; wait $RUN
+# The ping is refused until the helper says it listens; the question appears after the loop.
+until_ok 30 "$P" do hp ping || fail "helper: ping delivered" "the job never listened for ping"
+until_ok 30 hp_question || fail "helper: question asked" "no question from hp"
+"$P" answer "$(hp_question)" go > /dev/null 2>&1; wait $RUN
 expect "helper: command handled, question answered" "$(cat helper.out)" "answer: go pings: 1"
 expect "helper: metrics reported once" "$(field hp '[m["n"] for m in r["metrics"] if m["name"]=="loss"][0]')" '^20$'
 

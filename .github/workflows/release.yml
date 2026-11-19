@@ -32,13 +32,13 @@ jobs:
       SIGNED: ${{ secrets.APPLE_CERT_P12 != '' }}
       NOTARIZE: ${{ secrets.APPLE_CERT_P12 != '' && secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 } # tags and commit count give the version and build number
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with: { version: 10 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml }
 
       # One version for every file. Values from the tag only ever reach scripts through env
@@ -178,7 +178,7 @@ jobs:
 
       - name: Keep the files (manual runs)
         if: env.TAG == ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pulse-build
           path: dist/

@@ -9,8 +9,8 @@ jobs:
     name: CLI and core (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
       - name: Build the CLI (pure Go)
         run: CGO_ENABLED=0 go build ./cmd/pulse
@@ -21,12 +21,12 @@ jobs:
     name: App, UI and end-to-end (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with: { version: 10 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml }
       - name: Build the UI
         run: cd web && pnpm install --frozen-lockfile && pnpm run build
@@ -41,9 +41,11 @@ jobs:
     name: Python helper
     runs-on: ubuntu-latest
     strategy:
-      matrix: { python: ["3.8", "3.12"] }
+      fail-fast: false
+      # The oldest Python the helper supports (pyproject: >=3.8) and a current one. uv installs
+      # versions the runner image no longer ships.
+      matrix: { python: ["3.8", "3.13"] }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "${{ matrix.python }}" }
-      - run: python -m unittest discover -s sdk/python/tests -v
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: uv run --no-project --python ${{ matrix.python }} python -m unittest discover -s sdk/python/tests -v
