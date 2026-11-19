@@ -1,0 +1,184 @@
+name: release
+
+# Push a tag like v0.1.0 to publish a release: Pulse-<version>.dmg (universal app with the CLI
+# inside), CLI archives for macOS and Linux, and SHA256SUMS. A tag with a suffix (v0.2.0-rc.1)
+# publishes a prerelease. Run it by hand (workflow_dispatch) to build the same files as a
+# workflow artifact without publishing anything.
+#
+# Signing and notarization happen when these repository secrets exist (see docs/release.md);
+# without them the app is ad-hoc signed and the release notes say how to open it.
+#   APPLE_CERT_P12        base64 of a "Developer ID Application" certificate + key (.p12)
+#   APPLE_CERT_PASSWORD   the .p12's password
+#   APPLE_ID              Apple ID email used for notarization
+#   APPLE_TEAM_ID         10-character team ID
+#   APPLE_APP_PASSWORD    app-specific password for that Apple ID
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      SIGNED: ${{ secrets.APPLE_CERT_P12 != '' }}
+      NOTARIZE: ${{ secrets.APPLE_CERT_P12 != '' && secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # tags and commit count give the version and build number
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml }
+
+      # One version for every file. Values from the tag only ever reach scripts through env
+      # (never pasted into the script text): a ref name may hold $( ) or quotes.
+      - name: Version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            if ! [[ "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::tag $REF_NAME isn't a version like v1.2.3 or v1.2.3-rc.1"; exit 1
+            fi
+            echo "TAG=$REF_NAME" >> "$GITHUB_ENV"
+            echo "VERSION=$REF_NAME" >> "$GITHUB_ENV"
+            [[ "$REF_NAME" == *-* ]] && echo "PRERELEASE=true" >> "$GITHUB_ENV" || echo "PRERELEASE=false" >> "$GITHUB_ENV"
+          else
+            echo "TAG=" >> "$GITHUB_ENV"
+            echo "VERSION=v0.0.0-dev.$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Test
+        run: |
+          (cd web && pnpm install --frozen-lockfile && pnpm run build)
+          go vet ./... && go test ./...
+
+      - name: Import the signing certificate
+        if: env.SIGNED == 'true'
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          PASS="$(uuidgen)"
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          ID=$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -nE 's/.*"(Developer ID Application: [^"]+)".*/\1/p' | head -1)
+          [ -n "$ID" ] || { echo "::error::no Developer ID Application identity in the certificate"; exit 1; }
+          echo "SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
+
+      - name: Build the app (universal)
+        run: ARCHS="arm64 amd64" ./scripts/build-app.sh
+
+      - name: End-to-end
+        run: test/e2e/run.sh
+
+      # The app gets its own ticket (so it opens offline after it's copied out of the disk
+      # image), then the disk image is notarized and stapled too.
+      - name: Notarize the app
+        if: env.NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          ditto -c -k --keepParent build/Pulse.app "$RUNNER_TEMP/Pulse.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Pulse.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --timeout 30m
+          xcrun stapler staple build/Pulse.app
+
+      - name: Disk image
+        run: ./scripts/make-dmg.sh
+
+      - name: Notarize the disk image
+        if: env.NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          DMG="build/Pulse-${VERSION#v}.dmg"
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --timeout 30m
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      - name: CLI archives and checksums
+        run: |
+          V="${VERSION#v}"
+          mkdir -p dist
+          cp "build/Pulse-$V.dmg" dist/
+          pack() { # os arch binary
+            d=$(mktemp -d); cp "$3" "$d/pulse"; cp README.md "$d/"
+            tar -C "$d" -czf "dist/pulse_${V}_$1_$2.tar.gz" pulse README.md; rm -rf "$d"
+          }
+          pack darwin universal build/pulse
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=$VERSION -X main.commit=$(git rev-parse --short HEAD)" -o "build/pulse-linux-$arch" ./cmd/pulse
+            pack linux $arch "build/pulse-linux-$arch"
+          done
+          (cd dist && shasum -a 256 * > SHA256SUMS)
+          ls -la dist
+
+      - name: Release notes
+        run: |
+          V="${VERSION#v}"
+          {
+            echo "## Install"
+            echo
+            echo "1. Download **Pulse-$V.dmg**, open it and drag **Pulse** to **Applications**."
+            if [ "$NOTARIZE" != "true" ]; then
+              echo "2. This build isn't notarized by Apple yet. The first time, right-click **Pulse** in Applications → **Open** → **Open**"
+              echo "   (or run \`xattr -dr com.apple.quarantine /Applications/Pulse.app\`)."
+            else
+              echo "2. Open **Pulse** from Applications. It lives in the menubar."
+            fi
+            echo "3. Put the \`pulse\` command on your PATH:"
+            echo '   ```'
+            echo '   sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/Pulse.app/Contents/MacOS/pulse /usr/local/bin/pulse'
+            echo '   pulse doctor'
+            echo '   ```'
+            echo
+            echo "On Linux machines that report to a Mac, use \`pulse_${V}_linux_<arch>.tar.gz\`. Checksums are in \`SHA256SUMS\`."
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+      # A draft first, published only once every file is up; a re-run picks up the draft.
+      - name: Publish
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --draft --verify-tag --title "Pulse ${VERSION#v}" \
+              --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          fi
+          gh release edit "$TAG" --draft=false --prerelease="$PRERELEASE"
+
+      - name: Keep the files (manual runs)
+        if: env.TAG == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-build
+          path: dist/

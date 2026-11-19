@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon/pulse-512.png" width="128" height="128" alt="Pulse icon"></p>
+
 # Pulse
 
 Monitor any job from your Mac's menubar: training runs, builds, deploys, data pipelines, cron jobs.
@@ -24,17 +26,29 @@ pulse watch ingest --cmd 'aws s3 cp s3://bucket/progress.json -'
 
 ## Install
 
-Requirements: macOS 13+, Go 1.26+, Node 20+ with pnpm (to build the UI).
+Download **Pulse-&lt;version&gt;.dmg** from [Releases](../../releases), open it and drag Pulse to
+Applications (macOS 13+, Apple Silicon or Intel). Pulse lives in the menubar. Then put the CLI on
+your PATH; it ships inside the app:
 
 ```bash
-./scripts/build-app.sh          # builds build/Pulse.app and build/pulse
-open build/Pulse.app
-ln -s "$PWD/build/pulse" ~/.local/bin/pulse   # or anywhere on your PATH
+sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/Pulse.app/Contents/MacOS/pulse /usr/local/bin/pulse
 pulse doctor
 ```
 
-The `pulse` CLI is a static Go binary and also runs on Linux (for remote machines):
-`GOOS=linux go build ./cmd/pulse`.
+If a release isn't notarized yet, open it the first time with right-click → **Open**.
+Linux machines that report to a Mac use the `pulse_<version>_linux_<arch>.tar.gz` archives.
+
+### From source
+
+Requirements: Go 1.26+, Node 20+ with pnpm (to build the UI).
+
+```bash
+./scripts/build-app.sh          # build/Pulse.app and build/pulse (ARCHS="arm64 amd64" for universal)
+./scripts/make-dmg.sh           # build/Pulse-<version>.dmg
+open build/Pulse.app
+```
+
+The `pulse` CLI is a static Go binary and also runs on Linux: `GOOS=linux go build ./cmd/pulse`.
 
 Python helper (optional): `pip install ./sdk/python`, see [sdk/python](sdk/python/README.md).
 
@@ -62,6 +76,7 @@ Every command has `--help`; read commands take `--json`.
 - [pulse.yaml reference](docs/config.md)
 - [HTTP API](docs/api.md)
 - [Security model](docs/security.md)
+- [Releasing](docs/release.md)
 - [Design plan](PLAN.md)
 
 ## Develop

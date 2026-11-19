@@ -32,8 +32,8 @@ jobs:
         run: cd web && pnpm install --frozen-lockfile && pnpm run build
       - name: Vet and test
         run: go vet ./... && go test ./...
-      - name: Build the app bundle
-        run: ./scripts/build-app.sh
+      - name: Build the app bundle (universal) and disk image
+        run: ARCHS="arm64 amd64" ./scripts/build-app.sh && ./scripts/make-dmg.sh
       - name: End-to-end
         run: test/e2e/run.sh
 
