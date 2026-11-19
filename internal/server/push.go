@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,13 @@ type pushAsk struct {
 	Options []string `json:"options"`
 }
 
+func pushHost(endpoint string) string {
+	if u, err := url.Parse(endpoint); err == nil {
+		return u.Host
+	}
+	return "?"
+}
+
 func clip(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
@@ -252,8 +260,9 @@ func (p *pusher) deliverEach(targets []pushSub, msg func(pushSub) webpush.Messag
 			p.remove("", t.Sub.Endpoint)
 			audit.Log("push.unsubscribed", map[string]any{"email": t.Email, "reason": "gone"})
 		case err != nil:
-			log.Printf("push to %s: %v", t.Email, err)
+			log.Printf("push to %s (%s): %v", t.Email, pushHost(t.Sub.Endpoint), err)
 		default:
+			log.Printf("push to %s (%s): accepted, %d bytes", t.Email, pushHost(t.Sub.Endpoint), len(m.Payload))
 			sent++
 		}
 	}
