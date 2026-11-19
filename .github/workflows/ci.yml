@@ -1,0 +1,49 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cli-linux:
+    name: CLI and core (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: Build the CLI (pure Go)
+        run: CGO_ENABLED=0 go build ./cmd/pulse
+      - name: Test everything that doesn't need macOS
+        run: go test $(go list ./... | grep -v /cmd/pulse-app)
+
+  app-macos:
+    name: App, UI and end-to-end (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml }
+      - name: Build the UI
+        run: cd web && pnpm install --frozen-lockfile && pnpm run build
+      - name: Vet and test
+        run: go vet ./... && go test ./...
+      - name: Build the app bundle
+        run: ./scripts/build-app.sh
+      - name: End-to-end
+        run: test/e2e/run.sh
+
+  python-helper:
+    name: Python helper
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { python: ["3.8", "3.12"] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: python -m unittest discover -s sdk/python/tests -v
