@@ -29,7 +29,13 @@ Pulse is reachable from the internet, so it changes the trust model:
 through the tunnel to the emails you list. Cloudflare Access signs people in, and Pulse verifies
 Access's signed token on every request itself (signature against the team's published keys,
 audience, issuer, expiry, email on the list), so a mistake in the Access policy alone lets no one in.
-Viewers can look (runs, charts, output, questions) and manage their own notifications; nothing else.
+Viewers can look (runs, charts, output, questions) and manage their own notifications. Operators
+(`--operator`) can also stop runs, answer questions (in the app, or with a question's buttons on the
+notification) and dismiss runs; each is recorded under their verified email (`web.stop`,
+`answered by web:<email>`). Nobody can run shell actions, change alerts or settings, or see tokens
+from the web: an alert rule's answer that runs a shell action (`Yes=action:deploy`) is refused from
+the web and gets no notification buttons; answer it on the hub. Dismissing and hiding are recorded
+too (`web.dismiss`, `web.hide`). Stop is never a notification button, so a stray tap can't end a job.
 Writes must come from the UI's own pages (`Origin`), pages carry a strict Content-Security-Policy,
 and open streams end within 30 seconds of someone losing access. Only the app manifest and icons
 (`/pwa/`) are public. Notifications are encrypted for each device (Web Push, RFC 8291), so the push

@@ -15,23 +15,27 @@ import (
 
 	"pulse/internal/audit"
 	"pulse/internal/cfaccess"
+	"pulse/internal/model"
 )
 
 // WebConfig lets people open the UI through the tunnel: Cloudflare Access
 // signs them in, and Pulse checks Access's token itself before showing
-// anything. Viewers can only look (no stop, answers, settings).
+// anything. Viewers can only look; operators can also stop runs and answer
+// questions (never run shell actions or change settings).
 type WebConfig struct {
-	Team   string   `json:"team"`   // Access team domain, e.g. myteam.cloudflareaccess.com
-	AUD    string   `json:"aud"`    // the Access application's audience tag
-	Emails []string `json:"emails"` // who may look (lowercase)
+	Team      string   `json:"team"`                // Access team domain, e.g. myteam.cloudflareaccess.com
+	AUD       string   `json:"aud"`                 // the Access application's audience tag
+	Emails    []string `json:"emails"`              // who may look (lowercase), operators included
+	Operators []string `json:"operators,omitempty"` // who may also act (lowercase)
 }
 
 type webAccess struct {
-	cfg    WebConfig
-	v      *cfaccess.Verifier
-	emails map[string]bool
-	seenMu sync.Mutex
-	seen   map[string]time.Time // email → last audit entry
+	cfg       WebConfig
+	v         *cfaccess.Verifier
+	emails    map[string]bool
+	operators map[string]bool
+	seenMu    sync.Mutex
+	seen      map[string]time.Time // email → last audit entry
 }
 
 var (
@@ -49,30 +53,45 @@ func validWeb(c WebConfig) (WebConfig, error) {
 	if !audRe.MatchString(c.AUD) {
 		return c, fmt.Errorf("aud must be the Access application's audience tag (64 hex characters)")
 	}
-	var emails []string
-	seen := map[string]bool{}
-	for _, e := range c.Emails {
-		e = strings.ToLower(strings.TrimSpace(e))
-		if a, err := mail.ParseAddress(e); err != nil || a.Address != e || a.Name != "" {
-			return c, fmt.Errorf("%q isn't an email address", e)
+	clean := func(list []string) ([]string, error) {
+		var out []string
+		seen := map[string]bool{}
+		for _, e := range list {
+			e = strings.ToLower(strings.TrimSpace(e))
+			if a, err := mail.ParseAddress(e); err != nil || a.Address != e || a.Name != "" {
+				return nil, fmt.Errorf("%q isn't an email address", e)
+			}
+			if !seen[e] {
+				seen[e] = true
+				out = append(out, e)
+			}
 		}
-		if !seen[e] {
-			seen[e] = true
-			emails = append(emails, e)
-		}
+		sort.Strings(out)
+		return out, nil
+	}
+	ops, err := clean(c.Operators)
+	if err != nil {
+		return c, err
+	}
+	emails, err := clean(append(append([]string{}, c.Emails...), ops...)) // operators may look too
+	if err != nil {
+		return c, err
 	}
 	if len(emails) == 0 {
 		return c, fmt.Errorf("name at least one email that may open the UI")
 	}
-	sort.Strings(emails)
-	c.Emails = emails
+	c.Emails, c.Operators = emails, ops
 	return c, nil
 }
 
 func newWebAccess(c WebConfig) *webAccess {
-	w := &webAccess{cfg: c, v: &cfaccess.Verifier{Team: c.Team, AUD: c.AUD}, emails: map[string]bool{}, seen: map[string]time.Time{}}
+	w := &webAccess{cfg: c, v: &cfaccess.Verifier{Team: c.Team, AUD: c.AUD},
+		emails: map[string]bool{}, operators: map[string]bool{}, seen: map[string]time.Time{}}
 	for _, e := range c.Emails {
 		w.emails[e] = true
+	}
+	for _, e := range c.Operators {
+		w.operators[e] = true
 	}
 	return w
 }
@@ -114,18 +133,34 @@ func (s *Server) viewerHandler(publicURL string) http.Handler {
 	api("/stream", s.stream)
 	api("/asks", s.listAsks)
 	api("/session", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"remote": true, "read_only": true, "email": viewerEmail(r)})
+		op := s.isOperator(r)
+		writeJSON(w, map[string]any{"remote": true, "read_only": !op, "can_act": op, "email": viewerEmail(r)})
 	})
-	// The one thing a viewer may change: their own notifications.
+	// Operators: stop runs and answer questions, recorded under their
+	// verified email (never a name the browser picks).
+	mux.HandleFunc("POST /api/v1/runs/{id}/stop", s.operator(func(w http.ResponseWriter, r *http.Request) {
+		res, err := s.eng.Stop(r.PathValue("id"))
+		audit.Log("web.stop", map[string]any{"email": viewerEmail(r), "run": r.PathValue("id"), "result": res, "ok": err == nil})
+		if err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, map[string]string{"result": res})
+	}))
+	audited := func(event string, f func(string) bool) http.HandlerFunc {
+		return s.operator(func(w http.ResponseWriter, r *http.Request) {
+			audit.Log(event, map[string]any{"email": viewerEmail(r), "run": r.PathValue("id")})
+			s.runAction(f)(w, r)
+		})
+	}
+	mux.HandleFunc("POST /api/v1/runs/{id}/seen", audited("web.dismiss", s.eng.MarkSeen))
+	mux.HandleFunc("POST /api/v1/runs/{id}/archive", audited("web.hide", s.eng.Archive))
+	mux.HandleFunc("POST /api/v1/asks/{id}/answer", s.operator(s.webAnswer))
+	// Any viewer: their own notifications.
 	api("/web/push", s.pushStatus)
-	writes := map[string]http.HandlerFunc{
-		"/api/v1/web/push":             s.pushSubscribe,
-		"/api/v1/web/push/unsubscribe": s.pushUnsubscribe,
-		"/api/v1/web/push/test":        s.pushTest,
-	}
-	for path, h := range writes {
-		mux.HandleFunc("POST "+path, h)
-	}
+	mux.HandleFunc("POST /api/v1/web/push", s.pushSubscribe)
+	mux.HandleFunc("POST /api/v1/web/push/unsubscribe", s.pushUnsubscribe)
+	mux.HandleFunc("POST /api/v1/web/push/test", s.pushTest)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/popover", http.StatusFound)
 	})
@@ -150,8 +185,8 @@ func (s *Server) viewerHandler(publicURL string) http.Handler {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			// Writes only from this site's own pages: a browser always sends
 			// Origin on a POST, so a missing one isn't a browser we trust.
-			if r.Method != http.MethodPost || writes[r.URL.Path] == nil || r.Header.Get("Origin") != origin {
-				writeErr(w, http.StatusForbidden, "the web UI is read-only")
+			if r.Method != http.MethodPost || r.Header.Get("Origin") != origin {
+				writeErr(w, http.StatusForbidden, "writes must come from this site's own pages")
 				return
 			}
 		}
@@ -164,6 +199,62 @@ func (s *Server) viewerHandler(publicURL string) http.Handler {
 }
 
 const viewerKey ctxKey = 100
+
+// runsShell reports whether answering a with answer would run a shell action
+// (an alert rule's "Label=action:<name>").
+func runsShell(a model.Ask, answer string) bool {
+	return strings.HasPrefix(a.Then[answer], "action:")
+}
+
+// anyShell reports whether any of a's answers runs a shell action.
+func anyShell(a model.Ask) bool {
+	for _, do := range a.Then {
+		if strings.HasPrefix(do, "action:") {
+			return true
+		}
+	}
+	return false
+}
+
+// isOperator reports whether the signed-in viewer may act.
+func (s *Server) isOperator(r *http.Request) bool {
+	wa := s.webAccess()
+	return wa != nil && wa.operators[viewerEmail(r)]
+}
+
+// operator lets only operators through to h.
+func (s *Server) operator(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.isOperator(r) {
+			writeErr(w, http.StatusForbidden, "view only: ask the hub's admin to make you an operator")
+			return
+		}
+		h(w, r)
+	}
+}
+
+// webAnswer answers a question for an operator, as "web:<their email>".
+func (s *Server) webAnswer(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Answer string `json:"answer"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	// An alert rule can tie an answer to a shell action; those are answered
+	// on the hub, never from the web.
+	if ask, ok := s.eng.GetAsk(r.PathValue("id")); ok && runsShell(ask, strings.TrimSpace(in.Answer)) {
+		writeErr(w, http.StatusForbidden, "this answer runs a shell action on the hub: answer it there (pulse answer)")
+		return
+	}
+	a, err := s.eng.Answer(r.PathValue("id"), in.Answer, "web:"+viewerEmail(r))
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, a)
+}
 
 // revokeWhenAccessEnds ends a viewer's request (an open stream, really) once
 // they may no longer look: the web UI was turned off or its list changed,
@@ -269,6 +360,6 @@ func (s *Server) setWeb(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.web = newWebAccess(cfg)
 	s.mu.Unlock()
-	audit.Log("web.enabled", map[string]any{"team": cfg.Team, "emails": cfg.Emails})
+	audit.Log("web.enabled", map[string]any{"team": cfg.Team, "emails": cfg.Emails, "operators": cfg.Operators})
 	writeJSON(w, s.remoteView())
 }

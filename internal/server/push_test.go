@@ -92,6 +92,9 @@ func TestViewerManagesOwnPushSubscription(t *testing.T) {
 	if r := do(t, "POST", remote.URL+"/api/v1/web/push/test", "", "", hdr...); r.StatusCode != 200 {
 		t.Fatalf("test push: %d", r.StatusCode)
 	}
+	for deadline := time.Now().Add(2 * time.Second); len(sent()) == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond) // sent in the background
+	}
 	if got := sent(); len(got) != 1 || got[0].endpoint != ep {
 		t.Fatalf("test push sent %v", got)
 	}
@@ -179,13 +182,12 @@ func TestPublicAppFiles(t *testing.T) {
 }
 
 func TestPayloadIsClipped(t *testing.T) {
-	p := payloadFor(model.Notification{Title: strings.Repeat("é", 200), Body: strings.Repeat("x", 1000), AskID: "q"})
+	p := payloadFor(model.Notification{Title: strings.Repeat("é", 200), Body: strings.Repeat("x", 1000), AskID: "q"}, false, true)
 	if len(p.Title) > 125 || len(p.Body) > 450 || !strings.HasSuffix(p.Title, "…") {
 		t.Fatalf("title %d body %d", len(p.Title), len(p.Body))
 	}
-	b, _ := json.Marshal(p)
-	if len(b) > webpush.MaxPayload {
-		t.Fatalf("payload %d bytes", len(b))
+	if b := encodePayload(payloadFor(model.Notification{Title: strings.Repeat("<", 120), Subtitle: strings.Repeat("&", 500), AskID: "q", AskOptions: []string{strings.Repeat(">", 40), "no"}}, true, true)); len(b) > webpush.MaxPayload {
+		t.Fatalf("worst-case payload %d bytes doesn't fit one push", len(b))
 	}
 }
 
@@ -250,7 +252,7 @@ func TestRejectedSubscriptionIsDropped(t *testing.T) {
 }
 
 func TestQuestionHintSurvivesClipping(t *testing.T) {
-	p := payloadFor(model.Notification{Title: "deploy asks", Subtitle: strings.Repeat("q", 300), Body: strings.Repeat("c", 300), AskID: "q_1"})
+	p := payloadFor(model.Notification{Title: "deploy asks", Subtitle: strings.Repeat("q", 300), Body: strings.Repeat("c", 300), AskID: "q_1"}, false, true)
 	if !strings.HasSuffix(p.Body, "Answer it on the machine running Pulse.") {
 		t.Fatalf("hint cut off: …%s", p.Body[len(p.Body)-40:])
 	}

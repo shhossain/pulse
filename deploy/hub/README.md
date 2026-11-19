@@ -102,11 +102,14 @@ To check on jobs from a phone or any browser, let people sign in through Access:
    policy alone doesn't let anyone in). The audience tag is on the application's overview page.
 
 ```bash
-pulse-admin remote web --team <team>.cloudflareaccess.com --aud <audience tag> --email you@example.com
+pulse-admin remote web --team <team>.cloudflareaccess.com --aud <audience tag> --operator you@example.com
 ```
 
-Open `https://<HOSTNAME>`, sign in, and Pulse shows its jobs, charts and output. It is view-only:
-stopping jobs, answering questions and settings stay on the hub. Viewers see everything jobs report,
+`--email` lets someone look; `--operator` also lets them stop runs and answer questions (from the
+app, or the buttons on a question's notification). Both can turn on notifications on their phone.
+
+Open `https://<HOSTNAME>`, sign in, and Pulse shows its jobs, charts and output. Shell actions,
+alerts and settings stay on the hub. Viewers see everything jobs report,
 command lines and output included, so list only people you'd show your terminal.
 `pulse-admin remote web off` turns it off; open pages stop updating within 30 seconds.
 

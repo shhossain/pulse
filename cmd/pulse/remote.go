@@ -15,8 +15,9 @@ type remoteView struct {
 	Listen  string `json:"listen"`
 	Tunnel  bool   `json:"tunnel"`
 	Web     *struct {
-		Team   string   `json:"team"`
-		Emails []string `json:"emails"`
+		Team      string   `json:"team"`
+		Emails    []string `json:"emails"`
+		Operators []string `json:"operators"`
 	} `json:"web"`
 	Error      string `json:"error"`
 	Candidates []struct {
@@ -67,7 +68,7 @@ func cmdRemote(args []string) int {
 		printRemote(v)
 	case "web":
 		body := map[string]any{"enable": true}
-		var emails []string
+		var emails, ops []string
 		if len(args) == 1 && args[0] == "off" {
 			body = map[string]any{"enable": false}
 		} else {
@@ -82,15 +83,17 @@ func cmdRemote(args []string) int {
 					body["aud"] = args[i+1]
 				case "--email":
 					emails = append(emails, strings.Split(args[i+1], ",")...)
+				case "--operator":
+					ops = append(ops, strings.Split(args[i+1], ",")...)
 				default:
 					return printHelp("remote") + 2
 				}
 				i++
 			}
-			if body["team"] == nil || body["aud"] == nil || len(emails) == 0 {
+			if body["team"] == nil || body["aud"] == nil || len(emails)+len(ops) == 0 {
 				return printHelp("remote") + 2
 			}
-			body["emails"] = emails
+			body["emails"], body["operators"] = emails, ops
 		}
 		var v remoteView
 		if err := c.Do(ctx, "POST", "/api/v1/remote/web", body, &v); err != nil {
@@ -205,7 +208,12 @@ func printRemote(v remoteView) {
 		fmt.Printf("The tunnel must forward to http://%s (listening on loopback only).\n", v.Listen)
 		fmt.Println("Other machines push with a job token: pulse remote token <job>")
 		if v.Web != nil {
-			fmt.Printf("Web UI (read-only) at %s for %s, signed in by %s.\n", v.URL, strings.Join(v.Web.Emails, ", "), v.Web.Team)
+			fmt.Printf("Web UI at %s for %s, signed in by %s.\n", v.URL, strings.Join(v.Web.Emails, ", "), v.Web.Team)
+			if len(v.Web.Operators) > 0 {
+				fmt.Printf("Can stop runs and answer questions: %s.\n", strings.Join(v.Web.Operators, ", "))
+			} else {
+				fmt.Println("Everyone views only (add --operator <email> to let someone stop runs and answer).")
+			}
 		} else {
 			fmt.Println("Web UI: off (pulse remote web --team … --aud … --email …)")
 		}
