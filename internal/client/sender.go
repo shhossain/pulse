@@ -196,7 +196,10 @@ func (s *RunSender) flush(force bool) bool {
 			s.launched = true
 			go LaunchApp()
 		}
-		if apiErr != nil && apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != 401 {
+		// Keep the data when the refusal isn't about it: auth (401), a
+		// limit (429: try later) or something in front of Pulse.
+		if apiErr != nil && !apiErr.Intercepted && apiErr.Status >= 400 && apiErr.Status < 500 &&
+			apiErr.Status != 401 && apiErr.Status != 429 {
 			s.pending = s.pending[n:] // the app rejected this data; don't retry it forever
 			s.logs = dropFront(s.logs, nl)
 			s.logsSent += int64(nl)

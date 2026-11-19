@@ -8,8 +8,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,29 +33,69 @@ func (s *Server) pushRoutes(api func(string, http.HandlerFunc)) {
 
 // RemoteHandler serves other machines: push routes only, push-scope tokens
 // only (the admin token is refused even if it leaks), and no browsers.
-func (s *Server) RemoteHandler() http.Handler {
+func (s *Server) RemoteHandler() http.Handler { return s.remoteHandler(false) }
+
+// remoteHandler is RemoteHandler; in tunnel mode (reachable from the
+// internet) only job tokens work: this machine's own push token, which may
+// report any job without limits, stays on private networks.
+func (s *Server) remoteHandler(tunnel bool) http.Handler {
 	mux := http.NewServeMux()
 	s.pushRoutes(func(pattern string, h http.HandlerFunc) {
 		method, path, _ := strings.Cut(pattern, " ")
 		mux.HandleFunc(method+" /api/v1"+path, h)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Origin") != "" || r.Header.Get("Cookie") != "" {
-			http.Error(w, "browsers can't use the remote endpoint", http.StatusForbidden)
+		if r.Header.Get("Origin") != "" || hasForeignCookie(r) {
+			writeErr(w, http.StatusForbidden, "browsers can't use the remote endpoint")
 			return
 		}
-		if sc, _ := s.scopeOf(r); sc == scopeAdmin {
+		sc, job := s.scopeOf(r)
+		switch {
+		case sc == scopeAdmin:
 			writeErr(w, http.StatusForbidden, "the admin token only works on this Mac; use a push token (pulse remote token <job>)")
+			return
+		case tunnel && sc == scopePush && job == "":
+			writeErr(w, http.StatusForbidden, "only job tokens work through the tunnel (pulse remote token <job>)")
+			return
+		}
+		if _, pattern := mux.Handler(r); pattern == "" { // in JSON, like every Pulse error
+			writeErr(w, http.StatusNotFound, "not available remotely: other machines can only report jobs")
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
 
+// accessCookie is the cookie Cloudflare Access adds to every request it lets
+// through to the origin (service tokens included). It isn't a sign of a browser.
+const accessCookie = "CF_Authorization"
+
+// hasForeignCookie reports whether r carries cookies other than Access's:
+// command-line clients send none, so any other cookie means a browser. It
+// reads the raw header: r.Cookies() silently skips cookies it can't parse,
+// and an unparseable cookie is still a cookie.
+func hasForeignCookie(r *http.Request) bool {
+	for _, line := range r.Header.Values("Cookie") {
+		for _, part := range strings.Split(line, ";") {
+			if strings.TrimSpace(part) == "" {
+				continue
+			}
+			name, _, _ := strings.Cut(part, "=")
+			if strings.TrimSpace(name) != accessCookie {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // RemoteConfig is persisted in remote.json.
 type RemoteConfig struct {
 	Enabled bool   `json:"enabled"`
 	Addr    string `json:"addr"` // ip:port
+	// PublicURL is set in tunnel mode: the listener binds to loopback only
+	// and a tunnel (e.g. cloudflared) forwards this https URL to it.
+	PublicURL string `json:"public_url,omitempty"`
 }
 
 func remoteFile() string { return filepath.Join(paths.Home(), "remote.json") }
@@ -84,6 +126,54 @@ var allowedNets = func() []*net.IPNet {
 }()
 
 var tailnet = allowedNets[0]
+
+// DefaultTunnelAddr is where the push listener binds in tunnel mode unless
+// told otherwise: loopback, on a fixed port the tunnel config can name.
+const DefaultTunnelAddr = "127.0.0.1:7778"
+
+// tunnelURL validates a tunnel's public URL: https, a host, nothing else
+// (no credentials, path, query or fragment). "" means no tunnel.
+func tunnelURL(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	bad := fmt.Errorf("tunnel URL must look like https://pulse.example.com, got %q", raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Opaque != "" ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		!dnsName(u.Hostname()) {
+		return "", bad
+	}
+	host := strings.ToLower(u.Hostname())
+	if p := u.Port(); p != "" || strings.HasSuffix(u.Host, ":") {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return "", bad
+		}
+		host = net.JoinHostPort(host, p)
+	}
+	return "https://" + host, nil
+}
+
+// dnsName reports whether h is a DNS host name a public certificate can
+// cover: dot-separated labels of letters, digits and inner hyphens, and not
+// an IP address.
+func dnsName(h string) bool {
+	if h == "" || len(h) > 253 || !strings.Contains(h, ".") || net.ParseIP(h) != nil {
+		return false
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(h, "."), ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // PrivateIP reports whether ip is on a private or Tailscale network — the
 // only places the remote listener may bind (never 0.0.0.0 or a public IP).
@@ -129,40 +219,51 @@ func Candidates() []Candidate {
 }
 
 type remoteState struct {
-	srv  *http.Server
-	addr string
-	err  string
+	srv       *http.Server
+	addr      string
+	publicURL string // tunnel mode
+	err       string
 }
 
 // StartRemote applies the saved remote config (called at startup).
 func (s *Server) StartRemote() {
 	if c := loadRemote(); c.Enabled {
-		if err := s.listenRemote(c.Addr); err != nil {
+		if err := s.listenRemote(c.Addr, c.PublicURL); err != nil {
 			log.Printf("remote: %v", err)
 		}
 	}
 }
 
-func (s *Server) listenRemote(addr string) error {
+// listenRemote serves the push routes on addr. Without publicURL, addr must
+// be a Tailscale or private-network address; with one (tunnel mode), it must
+// be loopback, so only the local tunnel daemon can reach it.
+func (s *Server) listenRemote(addr, publicURL string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("address must be ip:port: %w", err)
 	}
+	if host == "localhost" { // resolve it here rather than trust the resolver
+		host = "127.0.0.1"
+	}
 	ip := net.ParseIP(host)
-	if ip == nil || !PrivateIP(ip) {
+	switch {
+	case publicURL != "" && (ip == nil || !ip.IsLoopback()):
+		return fmt.Errorf("with a tunnel, the listener must be on a loopback address (e.g. 127.0.0.1:7778), not %s", host)
+	case publicURL == "" && (ip == nil || !PrivateIP(ip)):
 		return fmt.Errorf("%s isn't a Tailscale or private-network address; Pulse never listens publicly", host)
 	}
 	s.stopRemote()
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		s.mu.Lock()
-		s.remote = &remoteState{addr: addr, err: err.Error()}
+		s.remote = &remoteState{addr: addr, publicURL: publicURL, err: err.Error()}
 		s.mu.Unlock()
 		return err
 	}
-	srv := &http.Server{Handler: s.RemoteHandler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: s.remoteHandler(publicURL != ""), ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes: 64 << 10}
 	s.mu.Lock()
-	s.remote = &remoteState{srv: srv, addr: ln.Addr().String()}
+	s.remote = &remoteState{srv: srv, addr: ln.Addr().String(), publicURL: publicURL}
 	s.mu.Unlock()
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -187,7 +288,9 @@ func (s *Server) stopRemote() {
 
 type remoteView struct {
 	Enabled    bool        `json:"enabled"`
-	URL        string      `json:"url,omitempty"`
+	URL        string      `json:"url,omitempty"`    // what other machines use (PULSE_URL)
+	Listen     string      `json:"listen,omitempty"` // where the listener is bound
+	Tunnel     bool        `json:"tunnel,omitempty"`
 	Error      string      `json:"error,omitempty"`
 	Candidates []Candidate `json:"candidates"`
 }
@@ -200,7 +303,11 @@ func (s *Server) remoteView() remoteView {
 		v.Enabled = s.remote.srv != nil
 		v.Error = s.remote.err
 		if v.Enabled {
+			v.Listen = s.remote.addr
 			v.URL = "http://" + s.remote.addr
+			if s.remote.publicURL != "" {
+				v.URL, v.Tunnel = s.remote.publicURL, true
+			}
 		}
 	}
 	if v.Candidates == nil {
@@ -215,8 +322,9 @@ func (s *Server) remoteStatus(w http.ResponseWriter, r *http.Request) { writeJSO
 // address and this app's port) or off.
 func (s *Server) setRemote(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Enable bool   `json:"enable"`
-		Addr   string `json:"addr"`
+		Enable    bool   `json:"enable"`
+		Addr      string `json:"addr"`
+		PublicURL string `json:"public_url"` // tunnel mode
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
@@ -229,8 +337,15 @@ func (s *Server) setRemote(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.remoteView())
 		return
 	}
+	publicURL, err := tunnelURL(in.PublicURL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	addr := in.Addr
-	if addr == "" {
+	if addr == "" && publicURL != "" {
+		addr = DefaultTunnelAddr
+	} else if addr == "" {
 		cs := Candidates()
 		if len(cs) == 0 || !cs[0].Tailscale {
 			writeErr(w, http.StatusBadRequest, "no Tailscale address found; start Tailscale, or pass --addr <private-ip>")
@@ -242,12 +357,12 @@ func (s *Server) setRemote(w http.ResponseWriter, r *http.Request) {
 	} else if h, p, err := net.SplitHostPort(addr); err == nil && p == "" {
 		addr = net.JoinHostPort(h, fmt.Sprint(s.port))
 	}
-	if err := s.listenRemote(addr); err != nil {
+	if err := s.listenRemote(addr, publicURL); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_ = saveRemote(RemoteConfig{Enabled: true, Addr: addr})
-	audit.Log("remote.enabled", map[string]any{"addr": addr})
+	_ = saveRemote(RemoteConfig{Enabled: true, Addr: addr, PublicURL: publicURL})
+	audit.Log("remote.enabled", map[string]any{"addr": addr, "public_url": publicURL})
 	writeJSON(w, s.remoteView())
 }
 

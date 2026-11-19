@@ -270,7 +270,9 @@ func cmdRun(args []string) int {
 			_, err = sendConfig(c, *job, path, true, false)
 			var apiErr *client.APIError
 			switch {
-			case errors.As(err, &apiErr) && apiErr.Status == 403:
+			case errors.As(err, &apiErr) && apiErr.Intercepted:
+				note("couldn't apply %s: %v", filepath.Base(path), err)
+			case errors.As(err, &apiErr) && (apiErr.Status == 403 || apiErr.Status == 404): // a remote endpoint
 				note("%s settings can only be applied on the Mac running Pulse (pulse apply there)", filepath.Base(path))
 			case err != nil:
 				note("couldn't apply %s: %v", filepath.Base(path), err)

@@ -282,6 +282,9 @@ Answer a question from "pulse inbox".
 usage:
   pulse remote                         is remote access on? which addresses can it use?
   pulse remote enable [--addr <ip>]    accept pushes from other machines (default: this Mac's Tailscale address)
+  pulse remote enable --tunnel <https-url> [--addr 127.0.0.1:<port>]
+                                       accept them through a tunnel (e.g. Cloudflare Tunnel) that
+                                       forwards <https-url> to a loopback port (default 127.0.0.1:7778)
   pulse remote disable
   pulse remote token <job> [--name x]  create a token that can only report <job> (shown once)
   pulse remote tokens                  list tokens (never their values)
@@ -290,8 +293,9 @@ usage:
 
 Remote machines can only report progress and receive Stop; the admin API,
 the UI and shell actions stay local. Pulse only listens on Tailscale or
-private-network addresses, never publicly. Tokens go in the
-Authorization header, never in URLs.
+private-network addresses, never publicly; with --tunnel it listens on
+loopback only and the tunnel decides who can reach it (put Cloudflare
+Access in front). Tokens go in the Authorization header, never in URLs.
 ```
 
 ## pulse skill

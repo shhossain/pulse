@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -68,11 +69,21 @@ func cmdAsk(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
 	var a model.Ask
-	err = c.Do(actx, "POST", "/api/v1/runs/"+url.PathEscape(push.Run)+"/asks",
-		map[string]any{"question": question, "options": options, "default": def, "timeout_s": timeout.Seconds()}, &a)
-	acancel()
+	for asked := time.Now(); ; {
+		actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = c.Do(actx, "POST", "/api/v1/runs/"+url.PathEscape(push.Run)+"/asks",
+			map[string]any{"question": question, "options": options, "default": def, "timeout_s": timeout.Seconds()}, &a)
+		acancel()
+		// Over the job's question limit: wait for room rather than give up
+		// (a script would take that as "no answer").
+		wait, limited := client.Limited(err)
+		if !limited || (timeout > 0 && time.Since(asked)+wait > timeout) {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "pulse: %v; waiting\n", err)
+		time.Sleep(min(wait, time.Minute))
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -85,7 +96,8 @@ func cmdAsk(args []string) int {
 		wcancel()
 		var apiErr *client.APIError
 		switch {
-		case errors.As(err, &apiErr): // the question is gone or we lost access: don't wait forever
+		case errors.As(err, &apiErr) && !apiErr.Intercepted && apiErr.Status != http.StatusTooManyRequests:
+			// the question is gone or we lost access: don't wait forever
 			return fail(fmt.Errorf("question %s: %v", a.ID, err))
 		case err != nil:
 			if unreachableSince.IsZero() {

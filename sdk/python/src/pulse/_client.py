@@ -35,7 +35,9 @@ def _home():
 
 def _discover():
     """(base_url, token) or (None, None)."""
-    url, token = os.environ.get("PULSE_URL"), os.environ.get("PULSE_TOKEN")
+    # Strip: a secret file's trailing newline isn't part of the value.
+    url = (os.environ.get("PULSE_URL") or "").strip()
+    token = (os.environ.get("PULSE_TOKEN") or "").strip() or None
     if url:
         host = urllib.parse.urlparse(url).hostname
         if not token and host in ("127.0.0.1", "localhost", "::1"):
@@ -47,6 +49,65 @@ def _discover():
         return url.rstrip("/"), _local_token()
     except Exception:
         return None, None
+
+
+def _access_env():
+    return (os.environ.get("PULSE_CF_ACCESS_CLIENT_ID", "").strip(),
+            os.environ.get("PULSE_CF_ACCESS_CLIENT_SECRET", "").strip())
+
+
+def _access_headers(url):
+    """Cloudflare Access service-token headers, when the app sits behind
+    Access: PULSE_CF_ACCESS_CLIENT_ID / _SECRET, both set, https only."""
+    cid, secret = _access_env()
+    if not cid or not secret or urllib.parse.urlparse(url).scheme != "https":
+        return {}
+    return {"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": secret}
+
+
+def _access_problem(url):
+    """Why the Access variables can't be used (None when fine or unset)."""
+    cid, secret = _access_env()
+    if not cid and not secret:
+        return None
+    if not cid or not secret:
+        return "set both PULSE_CF_ACCESS_CLIENT_ID and PULSE_CF_ACCESS_CLIENT_SECRET, or neither"
+    return None  # over http (e.g. Tailscale) it's simply not sent: never in clear text
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The API never redirects: a redirect is a login page in front of it,
+    and following one would hand the tokens to wherever it points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # urllib then raises HTTPError with the 3xx
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _intercepted(e):
+    """True when an HTTPError came from something in front of Pulse (a proxy,
+    tunnel or login page): Pulse answers every API error in JSON."""
+    ctype = (e.headers.get("Content-Type") if e.headers else "") or ""
+    return 300 <= e.code < 400 or not ctype.startswith("application/json")
+
+
+def _retry_after(e):
+    try:
+        return max(1, int((e.headers.get("Retry-After") if e.headers else None) or 5))
+    except ValueError:
+        return 5
+
+
+def _intercepted_msg(e):
+    loc = (e.headers.get("Location") if e.headers else "") or ""
+    if 300 <= e.code < 400 and urllib.parse.urlparse(loc).hostname and \
+            urllib.parse.urlparse(loc).hostname.endswith(".cloudflareaccess.com"):
+        return "Cloudflare Access asked for a login: set PULSE_CF_ACCESS_CLIENT_ID and _SECRET"
+    if e.headers and e.headers.get("Cf-Ray") and e.code in (401, 403):
+        return "Cloudflare refused the request (HTTP %d): check PULSE_CF_ACCESS_CLIENT_ID and _SECRET" % e.code
+    return "HTTP %d from something in front of Pulse, not Pulse itself" % e.code
 
 
 def _local_token():
@@ -144,7 +205,12 @@ class _Client:
         req.add_header("Content-Type", "application/json")
         if self.token:
             req.add_header("Authorization", "Bearer " + self.token)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        problem = _access_problem(self.url)
+        if problem:
+            self._warn(problem)
+        for k, v in _access_headers(self.url).items():
+            req.add_header(k, v)
+        with _OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read()
             return json.loads(raw) if raw else None
 
@@ -162,6 +228,12 @@ class _Client:
         try:
             self._request("POST", "/api/v1/runs/%s/events" % urllib.parse.quote(self.run), body)
         except urllib.error.HTTPError as e:
+            if _intercepted(e):  # not Pulse's answer: keep the data and retry
+                self._warn(_intercepted_msg(e))
+                return False
+            if e.code == 429:  # over a limit: keep the data, back off
+                self._warn("Pulse is limiting this job's updates (HTTP 429)")
+                return False
             if e.code == 401:  # token rotated: pick up the new one (this Mac's app)
                 url, token = _discover()
                 if url and token:
@@ -347,21 +419,40 @@ def ask(question, options=None, timeout=None, default=None):
     c._flush()  # make sure the run exists before asking
     body = {"question": question, "options": opts,
             "default": "" if default is None else str(default).strip(), "timeout_s": timeout_s}
-    try:
-        a = c._request("POST", "/api/v1/runs/%s/asks" % urllib.parse.quote(c.run), body)
-    except urllib.error.HTTPError as e:
-        print("pulse: the question was refused (HTTP %d); using the default" % e.code, file=sys.stderr)
-        return default
-    except Exception as e:
-        c._warn("couldn't ask (%s)" % e)
-        return default
+    asked = time.time()
+    while True:
+        try:
+            a = c._request("POST", "/api/v1/runs/%s/asks" % urllib.parse.quote(c.run), body)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and not _intercepted(e):
+                # Over the job's question limit: wait for room rather than
+                # quietly answer with the default.
+                wait = min(_retry_after(e), 60)
+                if not timeout_s or time.time() - asked + wait <= timeout_s:
+                    print("pulse: too many questions from this job; waiting %ds to ask" % wait, file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+            print("pulse: the question was refused (HTTP %d); using the default" % e.code, file=sys.stderr)
+            return default
+        except Exception as e:
+            c._warn("couldn't ask (%s)" % e)
+            return default
     qid, unreachable_since = a["id"], None
     while True:
         try:
             a = c._request("GET", "/api/v1/asks/%s?wait=30s" % urllib.parse.quote(qid), timeout=45)
             unreachable_since = None
-        except urllib.error.HTTPError:
-            return default  # the question is gone (or access lost): don't block forever
+        except urllib.error.HTTPError as e:
+            if not _intercepted(e) and e.code != 429:
+                return default  # the question is gone (or access lost): don't block forever
+            # a proxy or tunnel hiccup: wait it out like an outage
+            unreachable_since = unreachable_since or time.time()
+            if time.time() - unreachable_since > 300:
+                c._warn("Pulse unreachable for 5 minutes while waiting for an answer")
+                return default
+            time.sleep(3)
+            continue
         except Exception:
             unreachable_since = unreachable_since or time.time()
             if time.time() - unreachable_since > 300:

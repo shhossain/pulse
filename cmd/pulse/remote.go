@@ -12,6 +12,8 @@ import (
 type remoteView struct {
 	Enabled    bool   `json:"enabled"`
 	URL        string `json:"url"`
+	Listen     string `json:"listen"`
+	Tunnel     bool   `json:"tunnel"`
 	Error      string `json:"error"`
 	Candidates []struct {
 		IP        string `json:"ip"`
@@ -41,17 +43,21 @@ func cmdRemote(args []string) int {
 		}
 		printRemote(v)
 	case "enable":
-		addr := ""
+		addr, tunnel := "", ""
 		for i := 0; i < len(args); i++ {
-			if args[i] == "--addr" && i+1 < len(args) {
+			switch {
+			case args[i] == "--addr" && i+1 < len(args):
 				i++
 				addr = args[i]
-			} else {
+			case args[i] == "--tunnel" && i+1 < len(args):
+				i++
+				tunnel = args[i]
+			default:
 				return printHelp("remote") + 2
 			}
 		}
 		var v remoteView
-		if err := c.Do(ctx, "POST", "/api/v1/remote", map[string]any{"enable": true, "addr": addr}, &v); err != nil {
+		if err := c.Do(ctx, "POST", "/api/v1/remote", map[string]any{"enable": true, "addr": addr, "public_url": tunnel}, &v); err != nil {
 			return fail(err)
 		}
 		printRemote(v)
@@ -88,8 +94,16 @@ func cmdRemote(args []string) int {
 		}
 		fmt.Printf("Token %s can only report job %q. It's shown once — store it like a password.\n\n", out.Info.ID, out.Info.Job)
 		fmt.Printf("On the other machine:\n  export PULSE_URL=%s\n  export PULSE_TOKEN=%s\n", base, out.Token)
+		if v.Tunnel {
+			fmt.Println("  # if Cloudflare Access protects this URL, also its service token:")
+			fmt.Println("  export PULSE_CF_ACCESS_CLIENT_ID=<id>.access  PULSE_CF_ACCESS_CLIENT_SECRET=<secret>")
+		}
 		fmt.Printf("  pulse run -n %s -- <command>        # or: pulse push %s progress=3/10\n\n", shellQuoteArg(out.Info.Job), shellQuoteArg(out.Info.Job))
-		fmt.Printf("Without the pulse CLI:\n  curl -fsS -H \"Authorization: Bearer $PULSE_TOKEN\" -d status=running -d progress=3/10 \\\n       \"$PULSE_URL/api/v1/push/%s\"\n", url.PathEscape(out.Info.Job))
+		access := ""
+		if v.Tunnel {
+			access = "-H \"CF-Access-Client-Id: $PULSE_CF_ACCESS_CLIENT_ID\" -H \"CF-Access-Client-Secret: $PULSE_CF_ACCESS_CLIENT_SECRET\" \\\n       "
+		}
+		fmt.Printf("Without the pulse CLI:\n  curl -fsS -H \"Authorization: Bearer $PULSE_TOKEN\" %s-d status=running -d progress=3/10 \\\n       \"$PULSE_URL/api/v1/push/%s\"\n", access, url.PathEscape(out.Info.Job))
 		if !v.Enabled {
 			fmt.Println("\nRemote access is off. Turn it on with: pulse remote enable")
 		}
@@ -147,6 +161,10 @@ func cmdRemote(args []string) int {
 
 func printRemote(v remoteView) {
 	switch {
+	case v.Enabled && v.Tunnel:
+		fmt.Printf("Remote access is on through a tunnel: %s\n", v.URL)
+		fmt.Printf("The tunnel must forward to http://%s (listening on loopback only).\n", v.Listen)
+		fmt.Println("Other machines push with a job token: pulse remote token <job>")
 	case v.Enabled:
 		fmt.Printf("Remote access is on: %s\n", v.URL)
 		fmt.Println("Other machines push with a job token: pulse remote token <job>")
@@ -166,6 +184,7 @@ func printRemote(v remoteView) {
 		}
 		fmt.Println("\nTurn it on: pulse remote enable            (Tailscale address)")
 		fmt.Println("        or: pulse remote enable --addr <ip>")
+		fmt.Println("        or: pulse remote enable --tunnel https://<public-host>   (behind e.g. Cloudflare Tunnel)")
 	} else if len(v.Candidates) == 0 && !v.Enabled {
 		fmt.Println("No Tailscale or private-network address found. Pulse never listens on public addresses.")
 	}

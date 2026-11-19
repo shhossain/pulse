@@ -1,4 +1,4 @@
-// Package trayicon renders the menubar progress ring as a macOS template
+// Package trayicon renders the menubar progress rings as a macOS template
 // image: monochrome (only alpha matters) so macOS tints it for light/dark
 // menubars and the highlighted state, like built-in status items.
 package trayicon
@@ -14,11 +14,13 @@ import (
 // Size is the rendered pixel size (22pt @2x).
 const Size = 44
 
+// MaxRings is how many concentric rings fit in the icon and stay legible.
+const MaxRings = 3
+
 const (
 	cx, cy     = Size / 2.0, Size / 2.0
-	outer      = 17.0 // ring outer radius
-	inner      = 12.5 // ring inner radius
-	trackAlpha = 0.28 // unfilled part of the ring
+	outer      = 17.0 // outermost ring's outer radius
+	trackAlpha = 0.28 // unfilled part of a ring
 
 	// Attention badge: a dot at the top-right, separated from the ring by a
 	// transparent gap (the SF Symbols ".badge" look).
@@ -29,9 +31,31 @@ const (
 	samples = 4 // supersampling per axis for anti-aliasing
 )
 
-// Ring renders a progress ring for fraction p in [0,1]. A negative p renders
-// an idle ring (track only). badge adds the attention dot.
+// band is one ring's thickness and the gap to the next ring inward, by ring
+// count: rings get thinner as more share the icon (in pixels, 2px = 1pt).
+var band = [MaxRings + 1]struct{ width, gap float64 }{
+	1: {4.5, 0},
+	2: {3.5, 1.5},
+	3: {2.75, 1.25},
+}
+
+// Ring renders a single progress ring for fraction p in [0,1]. A negative p
+// renders an idle ring (track only). badge adds the attention dot.
 func Ring(p float64, badge bool) []byte {
+	return Rings([]float64{p}, badge)
+}
+
+// Rings renders one concentric ring per fraction, the first outermost. Each
+// fraction is in [0,1]; a negative one draws that ring's track only. No
+// fractions renders the idle ring; more than MaxRings keeps the first ones.
+// badge adds the attention dot.
+func Rings(fracs []float64, badge bool) []byte {
+	switch {
+	case len(fracs) == 0:
+		fracs = []float64{-1}
+	case len(fracs) > MaxRings:
+		fracs = fracs[:MaxRings]
+	}
 	img := image.NewNRGBA(image.Rect(0, 0, Size, Size))
 	for y := 0; y < Size; y++ {
 		for x := 0; x < Size; x++ {
@@ -40,7 +64,7 @@ func Ring(p float64, badge bool) []byte {
 				for sx := 0; sx < samples; sx++ {
 					px := float64(x) + (float64(sx)+0.5)/samples
 					py := float64(y) + (float64(sy)+0.5)/samples
-					sum += coverage(px, py, p, badge)
+					sum += coverage(px, py, fracs, badge)
 				}
 			}
 			if a := sum / (samples * samples); a > 0 {
@@ -54,7 +78,7 @@ func Ring(p float64, badge bool) []byte {
 }
 
 // coverage returns the alpha (0..1) at sub-pixel (px, py).
-func coverage(px, py, p float64, badge bool) float64 {
+func coverage(px, py float64, fracs []float64, badge bool) float64 {
 	if badge {
 		d := math.Hypot(px-badgeX, py-badgeY)
 		if d <= badgeR {
@@ -66,7 +90,14 @@ func coverage(px, py, p float64, badge bool) float64 {
 	}
 	fx, fy := px-cx, py-cy
 	r := math.Hypot(fx, fy)
-	if r < inner || r > outer {
+	b := band[len(fracs)]
+	// Which ring (0 = outermost) does radius r fall in, if any?
+	depth := outer - r
+	if depth < 0 {
+		return 0
+	}
+	i := int(depth / (b.width + b.gap))
+	if i >= len(fracs) || depth-float64(i)*(b.width+b.gap) > b.width {
 		return 0
 	}
 	// Angle clockwise from 12 o'clock, in [0,1).
@@ -74,7 +105,7 @@ func coverage(px, py, p float64, badge bool) float64 {
 	if a < 0 {
 		a++
 	}
-	if p >= 0 && a <= p {
+	if p := fracs[i]; p >= 0 && a <= p {
 		return 1
 	}
 	return trackAlpha

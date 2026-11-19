@@ -1,0 +1,10 @@
+# cloudflared config for the Pulse hub: the public hostname reaches only the
+# hub's push listener (loopback 7778), never the local API on 7777.
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/pulse-hub.json
+edge-ip-version: "6"   # the VM has no IPv4 egress
+no-autoupdate: true    # apt keeps cloudflared updated
+ingress:
+  - hostname: <HOSTNAME>   # e.g. pulse.example.com
+    service: http://127.0.0.1:7778
+  - service: http_status:404
