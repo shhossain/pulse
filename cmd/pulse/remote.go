@@ -10,10 +10,14 @@ import (
 )
 
 type remoteView struct {
-	Enabled    bool   `json:"enabled"`
-	URL        string `json:"url"`
-	Listen     string `json:"listen"`
-	Tunnel     bool   `json:"tunnel"`
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url"`
+	Listen  string `json:"listen"`
+	Tunnel  bool   `json:"tunnel"`
+	Web     *struct {
+		Team   string   `json:"team"`
+		Emails []string `json:"emails"`
+	} `json:"web"`
 	Error      string `json:"error"`
 	Candidates []struct {
 		IP        string `json:"ip"`
@@ -59,6 +63,41 @@ func cmdRemote(args []string) int {
 		var v remoteView
 		if err := c.Do(ctx, "POST", "/api/v1/remote", map[string]any{"enable": true, "addr": addr, "public_url": tunnel}, &v); err != nil {
 			return fail(err)
+		}
+		printRemote(v)
+	case "web":
+		body := map[string]any{"enable": true}
+		var emails []string
+		if len(args) == 1 && args[0] == "off" {
+			body = map[string]any{"enable": false}
+		} else {
+			for i := 0; i < len(args); i++ {
+				if i+1 >= len(args) {
+					return printHelp("remote") + 2
+				}
+				switch args[i] {
+				case "--team":
+					body["team"] = args[i+1]
+				case "--aud":
+					body["aud"] = args[i+1]
+				case "--email":
+					emails = append(emails, strings.Split(args[i+1], ",")...)
+				default:
+					return printHelp("remote") + 2
+				}
+				i++
+			}
+			if body["team"] == nil || body["aud"] == nil || len(emails) == 0 {
+				return printHelp("remote") + 2
+			}
+			body["emails"] = emails
+		}
+		var v remoteView
+		if err := c.Do(ctx, "POST", "/api/v1/remote/web", body, &v); err != nil {
+			return fail(err)
+		}
+		if jsonOut {
+			return printJSON(v)
 		}
 		printRemote(v)
 	case "disable":
@@ -165,6 +204,11 @@ func printRemote(v remoteView) {
 		fmt.Printf("Remote access is on through a tunnel: %s\n", v.URL)
 		fmt.Printf("The tunnel must forward to http://%s (listening on loopback only).\n", v.Listen)
 		fmt.Println("Other machines push with a job token: pulse remote token <job>")
+		if v.Web != nil {
+			fmt.Printf("Web UI (read-only) at %s for %s, signed in by %s.\n", v.URL, strings.Join(v.Web.Emails, ", "), v.Web.Team)
+		} else {
+			fmt.Println("Web UI: off (pulse remote web --team … --aud … --email …)")
+		}
 	case v.Enabled:
 		fmt.Printf("Remote access is on: %s\n", v.URL)
 		fmt.Println("Other machines push with a job token: pulse remote token <job>")

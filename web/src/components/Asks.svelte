@@ -2,7 +2,7 @@
   // Questions a job is waiting on (pulse.ask / pulse ask): answer in place.
   import { answerTip } from '../lib/format.js'
 
-  let { asks = [] } = $props()
+  let { asks = [], readOnly = false } = $props()
   let text = $state({})
   let error = $state('')
   let busy = $state('')
@@ -25,7 +25,9 @@
   <div class="ask" onclick={(e) => e.stopPropagation()}>
     <div class="q">{a.question}</div>
     {#if a.context}<div class="ctx">{a.context}</div>{/if}
-    {#if a.options?.length}
+    {#if readOnly}
+      <div class="ctx">Answer it on the machine running Pulse{a.options?.length ? `: ${a.options.join(' / ')}` : ''}.</div>
+    {:else if a.options?.length}
       <div class="opts">
         {#each a.options as o, i (o)}
           <button class:primary={i === 0} disabled={busy === a.id} data-tip={answerTip(a, o)} onclick={() => answer(a, o)}>{o}</button>

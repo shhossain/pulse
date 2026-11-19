@@ -25,6 +25,18 @@ Pulse is reachable from the internet, so it changes the trust model:
 - Clients never follow redirects and keep their data when a proxy (not Pulse) refuses a request, so
   an expired Access token delays reports instead of losing them.
 
+**Web UI and phone notifications (opt-in, hub only).** `pulse remote web` opens a read-only UI
+through the tunnel to the emails you list. Cloudflare Access signs people in, and Pulse verifies
+Access's signed token on every request itself (signature against the team's published keys,
+audience, issuer, expiry, email on the list), so a mistake in the Access policy alone lets no one in.
+Viewers can look (runs, charts, output, questions) and manage their own notifications; nothing else.
+Writes must come from the UI's own pages (`Origin`), pages carry a strict Content-Security-Policy,
+and open streams end within 30 seconds of someone losing access. Only the app manifest and icons
+(`/pwa/`) are public. Notifications are encrypted for each device (Web Push, RFC 8291), so the push
+service relaying them can't read them; the hub only sends to known browser push services, and
+drops devices those services reject. Viewers see everything jobs report, so list only people you'd
+show your terminal.
+
 **A compromised job machine.** Assume any machine running a job can be taken over. With its job token
 (and its Access service token) an attacker can report anything *about that one job*: fake progress,
 mark it done, ignore Stop, ask questions in your name. They can't read anything back (there are no

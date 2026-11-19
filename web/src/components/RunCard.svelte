@@ -4,7 +4,7 @@
   import StopButton from './StopButton.svelte'
   import Asks from './Asks.svelte'
   import { num, duration, ago, orderedMetrics, label, withUnit, statusTip, systemStats } from '../lib/format.js'
-  import { act, copy, openPage, getJSON } from '../lib/live.svelte.js'
+  import { act, copy, openPage, getJSON, session } from '../lib/live.svelte.js'
 
   let { run, now } = $props()
   let expanded = $state(false)
@@ -65,14 +65,14 @@
     <span class="dot" data-tip={statusTip(run)}></span>
     <span class="name" data-tip={`${run.job}, run #${run.seq}. Click to expand; ↗ opens the full page.`}>{run.job}<span class="seq">#{run.seq}</span></span>
     <span class="when" data-tip={run.status === 'running' ? `Running for ${when}, since ${new Date(run.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : `Last update ${new Date(run.updated_at).toLocaleString()}`}>{run.stop_requested ? 'stopping…' : when}</span>
-    {#if run.status === 'running'}<span class="hover-only"><StopButton {run} compact /></span>{/if}
+    {#if run.status === 'running' && !session.readOnly}<span class="hover-only"><StopButton {run} compact /></span>{/if}
     <button class="open" data-tip="Open the run’s page: charts, log and actions" aria-label="Open details" onclick={open}>
       <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><path d="M3.5 1.5h6v6M9.5 1.5 1.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
   </div>
 
   {#if run.asks?.length}
-    <Asks asks={run.asks} />
+    <Asks asks={run.asks} readOnly={session.readOnly} />
   {/if}
 
   {#if attention && run.status === 'lost'}
@@ -127,7 +127,7 @@
   {#if attention || expanded}
     <div class="actions">
       {#if run.cmd}<button data-tip="Copy the command that started this run, to run it again" onclick={copyCommand}>{copied ? 'Copied' : 'Copy command'}</button>{/if}
-      {#if attention}<button class="primary" data-tip="Mark as seen: clears the menu bar badge for this run" onclick={dismiss}>Dismiss</button>{/if}
+      {#if attention && !session.readOnly}<button class="primary" data-tip="Mark as seen: clears the menu bar badge for this run" onclick={dismiss}>Dismiss</button>{/if}
     </div>
   {/if}
 </div>

@@ -7,7 +7,7 @@
   import ActionBar from './components/ActionBar.svelte'
   import Asks from './components/Asks.svelte'
   import { untrack } from 'svelte'
-  import { live, connect, getJSON, copy, act } from './lib/live.svelte.js'
+  import { live, connect, getJSON, copy, act, session } from './lib/live.svelte.js'
   import { num, duration, ago, label, withUnit, statusTip } from './lib/format.js'
 
   const runId = decodeURIComponent(location.pathname.split('/').pop())
@@ -138,8 +138,8 @@
           </div>
         {/if}
         {#if run.cmd}<button data-tip="Copy the command that started this run, to run it again" onclick={copyCommand}>{copied ? 'Copied' : 'Copy command'}</button>{/if}
-        {#if run.status === 'running' || run.status === 'idle'}<StopButton {run} />{/if}
-        {#if (run.status === 'failed' || run.status === 'lost') && !run.seen}
+        {#if (run.status === 'running' || run.status === 'idle') && !session.readOnly}<StopButton {run} />{/if}
+        {#if (run.status === 'failed' || run.status === 'lost') && !run.seen && !session.readOnly}
           <button class="primary" data-tip="Mark as seen: clears the menu bar badge for this run" onclick={() => act(run.id, 'seen')}>Dismiss</button>
         {/if}
       </div>
@@ -159,9 +159,9 @@
       </div>
     {/if}
 
-    {#if run.asks?.length}<Asks asks={run.asks} />{/if}
+    {#if run.asks?.length}<Asks asks={run.asks} readOnly={session.readOnly} />{/if}
 
-    <ActionBar {run} />
+    {#if !session.readOnly}<ActionBar {run} />{/if}
 
     {#if run.status === 'failed' && run.message}
       <pre class="error">{run.message}</pre>
@@ -229,8 +229,10 @@
       </section>
     {/if}
 
-    <h2>Alerts</h2>
-    <Alerts job={run.job} />
+    {#if !session.readOnly}
+      <h2>Alerts</h2>
+      <Alerts job={run.job} />
+    {/if}
 
     <div class="toolbar">
       <h2>Output</h2>

@@ -91,7 +91,26 @@ pulse-admin remote enable --tunnel https://<HOSTNAME>   # push listener on 127.0
 Check from anywhere: without the service token, `curl https://<HOSTNAME>/api/v1/health` gets 403
 from Cloudflare; with it, `{"ok":true,...}`. Admin API and UI paths are 404 through the tunnel.
 
-## 4. Jobs
+## 4. Web UI (optional, read-only)
+
+To check on jobs from a phone or any browser, let people sign in through Access:
+
+1. In the Access application, add a policy: *Allow*, include the emails that may look. Set the
+   application's cookie **SameSite to Lax**: with *Strict*, the redirect back from the login page
+   arrives without the cookie and the browser loops ("too many redirects").
+2. On the hub, name the same people (Pulse checks Access's token itself, so a mistake in the Access
+   policy alone doesn't let anyone in). The audience tag is on the application's overview page.
+
+```bash
+pulse-admin remote web --team <team>.cloudflareaccess.com --aud <audience tag> --email you@example.com
+```
+
+Open `https://<HOSTNAME>`, sign in, and Pulse shows its jobs, charts and output. It is view-only:
+stopping jobs, answering questions and settings stay on the hub. Viewers see everything jobs report,
+command lines and output included, so list only people you'd show your terminal.
+`pulse-admin remote web off` turns it off; open pages stop updating within 30 seconds.
+
+## 5. Jobs
 
 On the hub: `pulse-admin remote token <job>`. On the job machine:
 
