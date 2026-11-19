@@ -77,7 +77,6 @@ Every command has `--help`; read commands take `--json`.
 - [HTTP API](docs/api.md)
 - [Security model](docs/security.md)
 - [Releasing](docs/release.md)
-- [Design plan](PLAN.md)
 
 ## Develop
 
