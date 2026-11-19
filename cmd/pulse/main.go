@@ -115,6 +115,7 @@ Run "pulse <command> --help" for details (e.g. pulse push --help).
 `
 
 func main() {
+	client.UserAgent = "pulse/" + version
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)

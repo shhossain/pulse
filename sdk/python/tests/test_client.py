@@ -267,6 +267,20 @@ class ProxyErrorTest(unittest.TestCase):
         self.assertEqual(Elsewhere.seen, [], "followed the redirect, sending the token along")
         self.assertEqual(len(cl.pending), 1)
 
+    def test_sends_its_own_user_agent(self):
+        # Cloudflare refuses Python's default "Python-urllib" User-Agent as a bot.
+        H = type("H", (_Scripted,), {"seen": []})
+        cl = self._client_for(H)
+        self.assertTrue(cl._flush())
+        ua = H.seen[0].get("User-Agent", "")
+        self.assertTrue(ua.startswith("pulse-python/"), ua)
+
+    def test_certificate_errors_say_how_to_fix_them(self):
+        import urllib.error
+        import pulse._client as c
+        e = urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        self.assertIn("Install Certificates", c._why(e))
+
     def test_values_are_trimmed(self):
         import pulse._client as c
         os.environ["PULSE_URL"] = "https://pulse.example.com\n"

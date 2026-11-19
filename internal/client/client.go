@@ -257,7 +257,12 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	return nil
 }
 
+// UserAgent names this client to the app and anything in front of it
+// (proxies like Cloudflare treat unnamed library clients as bots).
+var UserAgent = "pulse-cli"
+
 func (c *Client) addHeader(req *http.Request) {
+	req.Header.Set("User-Agent", UserAgent)
 	for k, vs := range c.Header {
 		for _, v := range vs {
 			req.Header.Add(k, v)
