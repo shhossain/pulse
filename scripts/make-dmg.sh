@@ -22,6 +22,7 @@ cleanup() {
 }
 trap cleanup EXIT
 ditto "$APP" "$STAGE/Pulse.app" # ditto keeps signatures and extended attributes intact
+cp LICENSE "$STAGE/LICENSE.txt"
 ln -s /Applications "$STAGE/Applications"
 cp assets/icon/Pulse.icns "$STAGE/.VolumeIcon.icns"
 

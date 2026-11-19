@@ -87,3 +87,7 @@ go test ./...                                   # unit and integration tests
 python3 -m unittest discover -s sdk/python/tests
 test/e2e/run.sh                                 # end to end against a headless app
 ```
+
+## License
+
+[MIT](LICENSE)

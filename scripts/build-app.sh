@@ -62,7 +62,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleExecutable</key><string>pulse-app</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>Pulse</string>
-  <key>NSHumanReadableCopyright</key><string>Pulse contributors</string>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Pulse contributors. MIT License.</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
   <key>CFBundleShortVersionString</key><string>${PLIST_VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

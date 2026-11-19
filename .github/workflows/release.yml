@@ -127,8 +127,8 @@ jobs:
           mkdir -p dist
           cp "build/Pulse-$V.dmg" dist/
           pack() { # os arch binary
-            d=$(mktemp -d); cp "$3" "$d/pulse"; cp README.md "$d/"
-            tar -C "$d" -czf "dist/pulse_${V}_$1_$2.tar.gz" pulse README.md; rm -rf "$d"
+            d=$(mktemp -d); cp "$3" "$d/pulse"; cp README.md LICENSE "$d/"
+            tar -C "$d" -czf "dist/pulse_${V}_$1_$2.tar.gz" pulse README.md LICENSE; rm -rf "$d"
           }
           pack darwin universal build/pulse
           for arch in amd64 arm64; do
