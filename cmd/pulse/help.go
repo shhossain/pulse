@@ -165,6 +165,26 @@ private-network addresses, never publicly; with --tunnel it listens on
 loopback only and the tunnel decides who can reach it (put Cloudflare
 Access in front). Tokens go in the Authorization header, never in URLs.
 `,
+	"hub": `usage:
+  pulse hub setup --url https://<hub> --admin '<command that runs a shell command on the hub>'
+                  [--cloudflare <account>/<access app>/<service-auth policy>] [--cloudflare-token-stdin]
+  pulse hub connect <job> --name <machine> [--env-file <path>]
+  pulse hub connect <job> --name <machine> --gcp-secret <name> --gcp-project <p> [--grant <vm service account>]
+  pulse hub disconnect <machine>
+  pulse hub list
+
+Connect a job machine to your always-on Pulse hub from this computer. connect
+creates the machine's own job token on the hub (through --admin, e.g.
+gcloud compute ssh … --command) and, when Cloudflare Access protects the hub,
+its own Access service token; then it stores the four values in one secret: a
+0600 env file (default ./pulse-<machine>.env) or a Google Secret Manager
+secret, and prints the lines to run on the machine. Secrets never appear on
+screen or in command lines. disconnect revokes both tokens.
+
+The Cloudflare API token (Access: Service Tokens and Apps and Policies, Edit)
+is read from stdin once and kept in the macOS Keychain (elsewhere a 0600 file),
+or from PULSE_CLOUDFLARE_API_TOKEN.
+`,
 	"watch": `usage:
   pulse watch <job> --cmd '<command>' [--every 60s] [--map key=path ...]
   pulse watch <job> --url <http(s) url> [--every 60s] [--map ...]

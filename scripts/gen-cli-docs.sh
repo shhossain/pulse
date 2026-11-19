@@ -11,7 +11,7 @@ go build -o /tmp/pulse-docs ./cmd/pulse
   echo '```'
   /tmp/pulse-docs help 2>&1 || true
   echo '```'
-  for c in run push watch ls show open stop rm alert mute action do apply trust ask inbox answer remote skill status; do
+  for c in run push watch ls show open stop rm alert mute action do apply trust ask inbox answer remote hub skill status; do
     echo
     echo "## pulse $c"
     echo
