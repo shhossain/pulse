@@ -53,7 +53,7 @@ func splitCommand(argv []string) (cmd string, args []string, asJSON bool) {
 
 var readCommands = map[string]bool{
 	"ls": true, "list": true, "show": true, "inbox": true, "alert": true, "alerts": true, "action": true,
-	"actions": true, "watch": true, "remote": true, "status": true, "version": true, "doctor": true,
+	"actions": true, "watch": true, "remote": true, "hub": true, "status": true, "version": true, "doctor": true,
 }
 
 func stripJSON(args []string) ([]string, bool) {
@@ -94,6 +94,7 @@ Manage:
   pulse apply [-f pulse.yaml]                  load job settings from a file
   pulse trust [-f pulse.yaml]                  allow a file's shell actions
   pulse remote [enable|token <job>|…]          let other machines report jobs
+  pulse hub connect <job> --name <machine>    connect a machine to your always-on hub
   pulse open [job] [--browser]                 open a job's page (or the overview)
   pulse status                                 is the Pulse app running?
   pulse doctor                                 check the setup and say what to fix
@@ -160,6 +161,8 @@ func main() {
 		code = cmdLabel(args)
 	case "remote":
 		code = cmdRemote(args)
+	case "hub":
+		code = cmdHub(args)
 	case "watch":
 		code = cmdWatch(args)
 	case "ask":

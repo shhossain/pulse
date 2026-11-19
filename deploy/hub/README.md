@@ -113,9 +113,33 @@ alerts and settings stay on the hub. Viewers see everything jobs report,
 command lines and output included, so list only people you'd show your terminal.
 `pulse-admin remote web off` turns it off; open pages stop updating within 30 seconds.
 
-## 5. Jobs
+## 5. Connecting job machines
 
-On the hub: `pulse-admin remote token <job>`. On the job machine:
+From your own computer, once:
+
+```bash
+pulse hub setup --url https://<HOSTNAME> \
+  --admin "gcloud compute ssh pulse-hub --zone=<zone> --tunnel-through-iap --quiet --command" \
+  --cloudflare <account id>/<access app id>/<service-auth policy id>
+pbpaste | pulse hub setup --cloudflare-token-stdin   # an API token with Access: Service Tokens
+                                                     # and Access: Apps and Policies, Edit
+```
+
+Then, per machine:
+
+```bash
+pulse hub connect train --name gpu-1                       # writes ./pulse-gpu-1.env (0600)
+pulse hub connect train --name gpu-2 --gcp-secret pulse-gpu-2 --gcp-project <p> \
+  --grant <vm service account>                             # or straight into Secret Manager
+```
+
+`connect` creates the machine's own job token on the hub and its own Access service token, waits
+until the hub accepts them, and prints what to run on the machine (the install one-liner, loading
+the secret, `pulse run`). Secrets never appear on screen or in command lines.
+`pulse hub disconnect gpu-1` revokes both tokens; `pulse hub list` shows what's connected.
+
+By hand instead: `pulse-admin remote token <job>` on the hub, a service token added to the Access
+policy, and on the machine:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shhossain/pulse/main/install.sh | sh
@@ -124,18 +148,16 @@ export PULSE_CF_ACCESS_CLIENT_ID=<id>.access PULSE_CF_ACCESS_CLIENT_SECRET=<secr
 pulse run -n <job> -- python train.py     # progress, metrics and sys.* (CPU, memory, GPU, disk)
 ```
 
-Keep these in the job machine's secret store (e.g. Secret Manager), not in images, scripts or logs.
-
 ## If a job machine is compromised
 
 It can only report its own job, within the limits in [security.md](../../docs/security.md). Cut it off:
 
 ```bash
-pulse-admin remote tokens                 # find the machine's token (NAME, LAST USED)
-pulse-admin remote revoke <id>
+pulse hub disconnect <machine>            # from your computer: both tokens at once
+# or on the hub: pulse-admin remote tokens, then pulse-admin remote revoke <id>
 ```
 
-Then revoke its service token in Zero Trust (Access → Service auth), check
+(By hand, also revoke its service token in Zero Trust, Access → Service auth.) Then check
 `sudo grep -E 'limit.exceeded|token' /var/lib/pulse/audit.log`, and `pulse-admin rm <job>` if you
 don't trust what it sent.
 

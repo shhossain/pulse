@@ -130,6 +130,9 @@ func cmdRemote(args []string) int {
 		}
 		var v remoteView
 		_ = c.Do(ctx, "GET", "/api/v1/remote", nil, &v)
+		if jsonOut { // for scripts (pulse hub connect): the token is in here, handle it as a secret
+			return printJSON(map[string]any{"id": out.Info.ID, "job": out.Info.Job, "token": out.Token, "url": v.URL, "tunnel": v.Tunnel})
+		}
 		base := v.URL
 		if base == "" {
 			base = "http://<this-mac>:7777"
