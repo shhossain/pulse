@@ -340,11 +340,13 @@ func cmdPush(args []string) int {
 }
 
 func cmdLs(args []string) int {
-	all, asJSON := false, jsonOut
+	all, asJSON, hubJSON := false, jsonOut, false
 	for _, a := range args {
 		switch a {
 		case "--all", "-a":
 			all = true
+		case "--hub":
+			hubJSON = true
 		default:
 			return printHelp("ls") + 2
 		}
@@ -359,9 +361,9 @@ func cmdLs(args []string) int {
 	var out struct {
 		Runs []model.Run `json:"runs"`
 	}
-	path := "/api/v1/runs"
+	path := "/api/v1/runs?hub=1" // a followed hub's runs too, marked "(hub)"
 	if all {
-		path += "?all=1"
+		path += "&all=1"
 	}
 	if err := c.Do(ctx, "GET", path, nil, &out); err != nil {
 		var apiErr *client.APIError
@@ -374,6 +376,9 @@ func cmdLs(args []string) int {
 	now := time.Now()
 	var runs []model.Run
 	for _, r := range out.Runs {
+		if r.Hub != "" && asJSON && !hubJSON {
+			continue // --json keeps its old meaning (this machine's runs); --hub adds a followed hub's
+		}
 		if all || r.Status == model.Running || now.Sub(r.UpdatedAt) <= 24*time.Hour {
 			runs = append(runs, r)
 		}
@@ -403,7 +408,11 @@ func cmdLs(args []string) int {
 		if r.Status != model.Running {
 			when = format.Duration(now.Sub(r.UpdatedAt)) + " ago"
 		}
-		fmt.Fprintf(tw, "%s\t#%d\t%s\t%s\t%s\t%s\n", r.Job, r.Seq, r.Status, prog, metrics, when)
+		job := r.Job
+		if r.Hub != "" {
+			job += " (hub)" // a followed hub's run: act on it there
+		}
+		fmt.Fprintf(tw, "%s\t#%d\t%s\t%s\t%s\t%s\n", job, r.Seq, r.Status, prog, metrics, when)
 		shown++
 	}
 	tw.Flush()

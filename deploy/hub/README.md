@@ -148,6 +148,17 @@ export PULSE_CF_ACCESS_CLIENT_ID=<id>.access PULSE_CF_ACCESS_CLIENT_SECRET=<secr
 pulse run -n <job> -- python train.py     # progress, metrics and sys.* (CPU, memory, GPU, disk)
 ```
 
+## 6. Your Mac's menubar (optional)
+
+```bash
+pulse hub follow
+```
+
+Your Mac's Pulse then shows the hub's runs next to its own: rings in the menubar, cards marked
+*hub* in the popover, `(hub)` in `pulse ls`. It views only (with an Access service token of its own,
+listed on the hub with `pulse-admin remote web --add-service`); clicking a hub run opens it on the
+hub, where operators can stop it or answer. `pulse hub unfollow` revokes that token.
+
 ## If a job machine is compromised
 
 It can only report its own job, within the limits in [security.md](../../docs/security.md). Cut it off:

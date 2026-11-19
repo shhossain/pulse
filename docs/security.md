@@ -41,7 +41,9 @@ and open streams end within 30 seconds of someone losing access. Only the app ma
 (`/pwa/`) are public. Notifications are encrypted for each device (Web Push, RFC 8291), so the push
 service relaying them can't read them; the hub only sends to known browser push services, and
 drops devices those services reject. Viewers see everything jobs report, so list only people you'd
-show your terminal.
+show your terminal. Access service tokens can be listed as viewers too (`--add-service`, used by
+`pulse hub follow` so a Mac's menubar shows the hub's runs): they only ever view, and a hub's runs
+shown on a Mac are never passed on through that Mac's own tunnel.
 
 **A compromised job machine.** Assume any machine running a job can be taken over. With its job token
 (and its Access service token) an attacker can report anything *about that one job*: fake progress,

@@ -149,6 +149,36 @@ func cmdHub(args []string) int {
 		}
 		return 0
 
+	case "follow", "unfollow":
+		c, err := hubctl.LoadConfig()
+		if err != nil {
+			return fail(err)
+		}
+		var cf *hubctl.Cloudflare
+		if c.Cloudflare != nil {
+			if t := hubctl.LoadCloudflareToken(hubctl.Exec); t != "" {
+				cf = &hubctl.Cloudflare{Token: t, Conf: *c.Cloudflare}
+			}
+		}
+		if sub == "unfollow" {
+			if _, err := hubctl.Unfollow(ctx, c, cf, hubctl.Exec); err != nil {
+				return fail(err)
+			}
+			fmt.Println("This Mac no longer follows the hub; its view-only token is revoked.")
+			return 0
+		}
+		fmt.Fprintln(os.Stderr, "Creating this Mac's view-only token and checking the hub accepts it…")
+		_, err = hubctl.Follow(ctx, c, cf, hubctl.Exec, hubctl.Hostname()+" menubar", hubctl.FollowReady(90*time.Second))
+		var notReady hubctl.ReadyErr
+		switch {
+		case errors.As(err, &notReady):
+			fmt.Fprintf(os.Stderr, "pulse: following, but %v\n", notReady.Err)
+		case err != nil:
+			return fail(err)
+		}
+		fmt.Printf("This Mac now follows %s: its runs show in the menubar within 30 seconds (view only;\nclick one to open it on the hub). Stop with: pulse hub unfollow\n", c.URL)
+		return 0
+
 	case "list", "ls", "":
 		c, err := hubctl.LoadConfig()
 		if err != nil {

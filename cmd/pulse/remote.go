@@ -85,15 +85,26 @@ func cmdRemote(args []string) int {
 					emails = append(emails, strings.Split(args[i+1], ",")...)
 				case "--operator":
 					ops = append(ops, strings.Split(args[i+1], ",")...)
+				case "--add-service":
+					body["add_service"] = args[i+1]
+				case "--remove-service":
+					body["remove_service"] = args[i+1]
 				default:
 					return printHelp("remote") + 2
 				}
 				i++
 			}
-			if body["team"] == nil || body["aud"] == nil || len(emails)+len(ops) == 0 {
+			_, add := body["add_service"]
+			_, rm := body["remove_service"]
+			switch {
+			case (add || rm) && (body["team"] != nil || body["aud"] != nil || len(emails)+len(ops) > 0):
+				return fail(fmt.Errorf("--add-service and --remove-service change only the services: run them on their own"))
+			case add || rm: // just the services
+			case body["team"] == nil || body["aud"] == nil || len(emails)+len(ops) == 0:
 				return printHelp("remote") + 2
+			default:
+				body["emails"], body["operators"] = emails, ops
 			}
-			body["emails"], body["operators"] = emails, ops
 		}
 		var v remoteView
 		if err := c.Do(ctx, "POST", "/api/v1/remote/web", body, &v); err != nil {

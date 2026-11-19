@@ -18,7 +18,7 @@
       {run.status === 'idle' ? 'idle' : run.status}{took ? ` in ${took}` : ''}{summary(run) ? ` · ${summary(run)}` : ''}
     </div>
   </div>
-  {#if !session.readOnly}<button class="x" aria-label="Hide" data-tip="Hide from this list (the run stays in history)" onclick={(e) => { e.stopPropagation(); act(run.id, 'archive') }}>×</button>{/if}
+  {#if !session.readOnly && !run.hub}<button class="x" aria-label="Hide" data-tip="Hide from this list (the run stays in history)" onclick={(e) => { e.stopPropagation(); act(run.id, 'archive') }}>×</button>{/if}
 </div>
 
 <style>

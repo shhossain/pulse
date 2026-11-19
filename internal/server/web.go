@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/mail"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,9 @@ type WebConfig struct {
 	AUD       string   `json:"aud"`                 // the Access application's audience tag
 	Emails    []string `json:"emails"`              // who may look (lowercase), operators included
 	Operators []string `json:"operators,omitempty"` // who may also act (lowercase)
+	// Services are Access service tokens (client IDs) allowed to look, e.g.
+	// a Mac's menubar app following this hub. Never operators.
+	Services []string `json:"services,omitempty"`
 }
 
 type webAccess struct {
@@ -34,13 +38,15 @@ type webAccess struct {
 	v         *cfaccess.Verifier
 	emails    map[string]bool
 	operators map[string]bool
+	services  map[string]bool
 	seenMu    sync.Mutex
 	seen      map[string]time.Time // email → last audit entry
 }
 
 var (
-	teamRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$`)
-	audRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	serviceIDRe = regexp.MustCompile(`^[0-9a-f]{32}\.access$`)
+	teamRe      = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$`)
+	audRe       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // validWeb checks and normalizes a WebConfig.
@@ -77,16 +83,30 @@ func validWeb(c WebConfig) (WebConfig, error) {
 	if err != nil {
 		return c, err
 	}
+	var svcs []string
+	for _, id := range c.Services {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if !serviceIDRe.MatchString(id) {
+			return c, fmt.Errorf("%q isn't an Access service token client ID (<32 hex>.access)", id)
+		}
+		if !slices.Contains(svcs, id) {
+			svcs = append(svcs, id)
+		}
+	}
+	sort.Strings(svcs)
 	if len(emails) == 0 {
 		return c, fmt.Errorf("name at least one email that may open the UI")
 	}
-	c.Emails, c.Operators = emails, ops
+	c.Emails, c.Operators, c.Services = emails, ops, svcs
 	return c, nil
 }
 
 func newWebAccess(c WebConfig) *webAccess {
 	w := &webAccess{cfg: c, v: &cfaccess.Verifier{Team: c.Team, AUD: c.AUD},
-		emails: map[string]bool{}, operators: map[string]bool{}, seen: map[string]time.Time{}}
+		emails: map[string]bool{}, operators: map[string]bool{}, services: map[string]bool{}, seen: map[string]time.Time{}}
+	for _, s := range c.Services {
+		w.services[s] = true
+	}
 	for _, e := range c.Emails {
 		w.emails[e] = true
 	}
@@ -103,7 +123,12 @@ func (wa *webAccess) viewer(r *http.Request) (string, bool) {
 		return "", false
 	}
 	id, err := wa.v.Verify(r.Context(), tok)
-	if err != nil || id.Email == "" || !wa.emails[id.Email] {
+	if err != nil {
+		return "", false
+	}
+	if id.Email == "" && wa.services[strings.ToLower(id.Service)] {
+		id.Email = "service:" + strings.ToLower(id.Service) // a listed service: views only
+	} else if id.Email == "" || !wa.emails[id.Email] {
 		return "", false
 	}
 	wa.seenMu.Lock()
@@ -325,7 +350,9 @@ func (s *Server) setWeb(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	var in struct {
-		Enable bool `json:"enable"`
+		Enable        bool   `json:"enable"`
+		AddService    string `json:"add_service"` // change only the services of the current config
+		RemoveService string `json:"remove_service"`
 		WebConfig
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
@@ -347,6 +374,23 @@ func (s *Server) setWeb(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "the web UI needs a tunnel: pulse remote enable --tunnel https://<host> first")
 		return
 	}
+	if in.AddService != "" || in.RemoveService != "" {
+		if c.Web == nil {
+			writeErr(w, http.StatusBadRequest, "turn the web UI on first (pulse remote web --team … --aud … --email …)")
+			return
+		}
+		next := *c.Web
+		next.Services = slices.DeleteFunc(slices.Clone(next.Services), func(s string) bool {
+			return strings.EqualFold(s, in.RemoveService) || strings.EqualFold(s, in.AddService)
+		})
+		if in.AddService != "" {
+			next.Services = append(next.Services, in.AddService)
+		}
+		in.WebConfig = next
+	} else if in.Services == nil && c.Web != nil {
+		// Reconfiguring who may look keeps the computers following this hub.
+		in.Services = c.Web.Services
+	}
 	cfg, err := validWeb(in.WebConfig)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -360,6 +404,6 @@ func (s *Server) setWeb(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.web = newWebAccess(cfg)
 	s.mu.Unlock()
-	audit.Log("web.enabled", map[string]any{"team": cfg.Team, "emails": cfg.Emails, "operators": cfg.Operators})
+	audit.Log("web.enabled", map[string]any{"team": cfg.Team, "emails": cfg.Emails, "operators": cfg.Operators, "services": cfg.Services})
 	writeJSON(w, s.remoteView())
 }

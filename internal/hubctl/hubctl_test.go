@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"pulse/internal/follow"
 )
 
 const acct = "0123456789abcdef0123456789abcdef"
@@ -43,7 +45,7 @@ func (f *fakeCF) server(t *testing.T) *httptest.Server {
 			f.n++
 			id := "st" + string(rune('0'+f.n))
 			f.tokens[id] = true
-			ok(map[string]string{"id": id, "client_id": id + ".access", "client_secret": "cf-secret-" + id, "expires_at": "2027-11-20T00:00:00Z"})
+			ok(map[string]string{"id": id, "client_id": id + ".access", "client_secret": "cf-secret-" + id + "-0123456789abcdef", "expires_at": "2027-11-20T00:00:00Z"})
 		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/accounts/"+acct+"/access/service_tokens/"):
 			delete(f.tokens, filepath.Base(r.URL.Path))
 			ok(map[string]any{})
@@ -105,6 +107,8 @@ func (f *fakeRunner) run(_ context.Context, stdin []byte, name string, args ...s
 				return []byte(f.tokenOut), nil
 			}
 			return []byte(`{"id":"t_1234abcd","job":"train","token":"pls_jobsecret","url":"https://pulse.example.com","tunnel":true}`), nil
+		case strings.Contains(cmd, "'remote' 'web'"):
+			return nil, nil
 		case strings.Contains(cmd, "'remote' 'revoke'"):
 			id := strings.Trim(strings.Fields(cmd)[3], "'")
 			if f.revokeGone {
@@ -156,7 +160,7 @@ func TestConnectToEnvFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(env)
-	for _, want := range []string{"PULSE_URL='https://pulse.example.com'", "PULSE_TOKEN='pls_jobsecret'", "PULSE_CF_ACCESS_CLIENT_ID='st1.access'", "PULSE_CF_ACCESS_CLIENT_SECRET='cf-secret-st1'"} {
+	for _, want := range []string{"PULSE_URL='https://pulse.example.com'", "PULSE_TOKEN='pls_jobsecret'", "PULSE_CF_ACCESS_CLIENT_ID='st1.access'", "PULSE_CF_ACCESS_CLIENT_SECRET='cf-secret-st1-0123456789abcdef'"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("env file lacks %s", want)
 		}
@@ -428,5 +432,72 @@ func TestExpiryIsRecorded(t *testing.T) {
 	m, err := Connect(context.Background(), conf, cf, r.run, "train", "gpu1", Destination{EnvFile: filepath.Join(t.TempDir(), "e")})
 	if err != nil || m.CFExpires.Year() != 2027 {
 		t.Fatalf("expiry %v %v", m.CFExpires, err)
+	}
+}
+
+func TestFollowAndUnfollow(t *testing.T) {
+	conf, cf, f, r := setup(t)
+	t.Setenv("PULSE_HOME", t.TempDir())
+	fc, err := Follow(context.Background(), conf, cf, r.run, "mac menubar", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fc.ClientID != "st1.access" || LoadSecret(r.run, FollowService, fc.ClientID) != "cf-secret-st1-0123456789abcdef" {
+		t.Fatalf("config %+v / secret not stored", fc)
+	}
+	added := false
+	for _, a := range r.argv {
+		added = added || strings.Contains(strings.Join(a, " "), "'remote' 'web' '--add-service' 'st1.access'")
+	}
+	if !added || len(f.include) != 2 {
+		t.Fatalf("hub viewer / Access rule not added: %v %v", added, f.include)
+	}
+	if secretsIn(r.argv) {
+		t.Fatal("a secret appeared in a command line")
+	}
+	if _, err := Follow(context.Background(), conf, cf, r.run, "mac", nil); err == nil {
+		t.Fatal("followed twice")
+	}
+	if _, err := Unfollow(context.Background(), conf, cf, r.run); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.tokens) != 0 || len(f.include) != 1 || LoadSecret(r.run, FollowService, "st1.access") != "" {
+		t.Fatalf("left behind: tokens %v include %v", f.tokens, f.include)
+	}
+}
+
+func TestFollowUndoesOnFailure(t *testing.T) {
+	conf, cf, f, r := setup(t)
+	t.Setenv("PULSE_HOME", t.TempDir())
+	conf.Admin = []string{"no-such-admin"} // the hub step fails
+	if _, err := Follow(context.Background(), conf, cf, r.run, "mac", nil); err == nil {
+		t.Fatal("followed although the hub refused")
+	}
+	if len(f.tokens) != 0 || len(f.include) != 1 {
+		t.Fatalf("Cloudflare token left: %v %v", f.tokens, f.include)
+	}
+}
+
+func TestFollowNotYetReadyKeepsItsSetup(t *testing.T) {
+	conf, cf, f, r := setup(t)
+	t.Setenv("PULSE_HOME", t.TempDir())
+	_, err := Follow(context.Background(), conf, cf, r.run, "mac", func(context.Context, follow.Config, string) error {
+		return errors.New("Cloudflare is slow")
+	})
+	var nr ReadyErr
+	if !errors.As(err, &nr) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, ok := follow.Load(); !ok || len(f.tokens) != 1 || LoadSecret(r.run, FollowService, "st1.access") == "" {
+		t.Fatal("a slow Cloudflare undid the follow while saying it worked")
+	}
+}
+
+func TestOldCloudflareTokenFileStillWorks(t *testing.T) {
+	t.Setenv("PULSE_HUB_DIR", t.TempDir())
+	t.Setenv("PULSE_CLOUDFLARE_API_TOKEN", "")
+	os.WriteFile(filepath.Join(Dir(), "cloudflare-api-token"), []byte("oldTokenFromV031_0123456789abcdef\n"), 0o600)
+	if got := LoadCloudflareToken(Exec); got != "oldTokenFromV031_0123456789abcdef" {
+		t.Fatalf("token from the old location: %q", got)
 	}
 }

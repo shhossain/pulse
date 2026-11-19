@@ -143,17 +143,19 @@ func runUI(eng *engine.Engine, srv *server.Server, notifier *app.SwitchNotifier)
 
 	// Keep the tray in sync with the engine, at most ~3 updates per second.
 	dirty := make(chan struct{}, 1)
-	eng.OnChange(func() {
+	poke := func() {
 		select {
 		case dirty <- struct{}{}:
 		default:
 		}
-	})
+	}
+	eng.OnChange(poke)
+	srv.OnHubRuns(poke) // a followed hub's runs count too
 	go func() {
 		var lastLabel string
 		lastFracs, lastBadge := []float64{-2}, false
 		for {
-			label, fracs, badge := traySummary(eng.Snapshot())
+			label, fracs, badge := traySummary(srv.Snapshot())
 			if label != lastLabel {
 				tray.SetLabel(label)
 				lastLabel = label
@@ -184,7 +186,7 @@ func traySummary(runs []model.Run) (label string, fracs []float64, badge bool) {
 	running := 0
 	for i := range runs {
 		r := &runs[i]
-		if r.NeedsAttention() {
+		if r.NeedsAttention() && r.Hub == "" { // a hub's run is dismissed on the hub, not here
 			badge = true
 		}
 		if r.Status != model.Running {

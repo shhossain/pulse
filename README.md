@@ -21,7 +21,9 @@ pulse watch ingest --cmd 'aws s3 cp s3://bucket/progress.json -'
   (`val_loss new min`, `eta < 5m`, `no update for 15m`). Stop, mute or answer right from the notification.
 - **Two-way.** Stop a job from the menubar; send it commands; let it ask you a question and wait
   (`pulse.ask("Deploy?", ["approve", "reject"])`).
-- **Remote jobs.** A VM or CI runner reports over Tailscale with a token that can only report its own job.
+- **Remote jobs.** A VM or CI runner reports over Tailscale, or to an always-on hub behind Cloudflare
+  (`pulse hub connect`), with a token that can only report its own job. The hub has a phone-friendly
+  web app with push notifications, and your Mac's menubar can follow it (`pulse hub follow`).
 - **Private.** Everything stays on your Mac. No accounts, no telemetry.
 
 ## Install

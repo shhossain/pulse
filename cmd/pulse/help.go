@@ -50,11 +50,14 @@ HTTP (same thing, e.g. from another tool):
   curl -X POST -H "Authorization: Bearer $(cat ~/Library/Application\ Support/Pulse/push.token)" \
        -d status=running -d progress=6/147 http://127.0.0.1:7777/api/v1/push/<job>
 `,
-	"ls": `usage: pulse ls [--all] [--json]
+	"ls": `usage: pulse ls [--all] [--json [--hub]]
 
 List jobs: every running run plus the latest run of each job (last 24h).
+When this Mac follows a hub (pulse hub follow), its runs are listed too,
+marked "(hub)"; act on them at the hub.
   --all    include older runs
-  --json   machine-readable output (all fields)
+  --json   machine-readable output (all fields): this machine's runs
+  --hub    with --json, a followed hub's runs too (each with "hub": its URL)
 `,
 	"show": `usage: pulse show <job|run-id> [--json]
 
@@ -152,6 +155,9 @@ Run one of a job's actions now (on its latest run).
                                        open the web UI through the tunnel to these people, signed
                                        in by Cloudflare Access (checked by Pulse); --email views,
                                        --operator also stops runs and answers questions
+  pulse remote web --add-service <id>.access | --remove-service <id>.access
+                                       let an Access service token view (read-only), e.g. a Mac
+                                       following this hub (pulse hub follow does this for you)
   pulse remote web off
   pulse remote disable
   pulse remote token <job> [--name x]  create a token that can only report <job> (shown once)
@@ -172,6 +178,7 @@ Access in front). Tokens go in the Authorization header, never in URLs.
   pulse hub connect <job> --name <machine> --gcp-secret <name> --gcp-project <p> [--grant <vm service account>]
   pulse hub disconnect <machine>
   pulse hub list
+  pulse hub follow | unfollow          show the hub's runs in this Mac's menubar (view only)
 
 Connect a job machine to your always-on Pulse hub from this computer. connect
 creates the machine's own job token on the hub (through --admin, e.g.
