@@ -161,7 +161,7 @@
 
     {#if run.asks?.length}<Asks asks={run.asks} readOnly={session.readOnly} />{/if}
 
-    {#if !session.readOnly}<ActionBar {run} />{/if}
+    {#if !session.remote}<ActionBar {run} />{/if}
 
     {#if run.status === 'failed' && run.message}
       <pre class="error">{run.message}</pre>
@@ -229,7 +229,7 @@
       </section>
     {/if}
 
-    {#if !session.readOnly}
+    {#if !session.remote}
       <h2>Alerts</h2>
       <Alerts job={run.job} />
     {/if}

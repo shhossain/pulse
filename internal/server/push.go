@@ -161,11 +161,19 @@ func (p *pusher) targets(allowed func(string) bool, email string) []pushSub {
 
 // pushPayload is what the service worker shows.
 type pushPayload struct {
-	Title string `json:"title"`
-	Body  string `json:"body,omitempty"`
-	URL   string `json:"url,omitempty"`
-	Tag   string `json:"tag,omitempty"`
-	Level string `json:"level,omitempty"`
+	Title string   `json:"title"`
+	Body  string   `json:"body,omitempty"`
+	URL   string   `json:"url,omitempty"`
+	Tag   string   `json:"tag,omitempty"`
+	Level string   `json:"level,omitempty"`
+	Ask   *pushAsk `json:"ask,omitempty"` // operators only: answer from the notification
+}
+
+// pushAsk lets an operator answer a question with the notification's
+// buttons (phones show at most two).
+type pushAsk struct {
+	ID      string   `json:"id"`
+	Options []string `json:"options"`
 }
 
 func clip(s string, n int) string {
@@ -179,25 +187,58 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func payloadFor(n model.Notification) pushPayload {
+// payloadFor is the notification for one person. Operators get answer
+// buttons for a question with one or two options (buttons=false when an
+// answer would run a shell action: those are answered on the hub).
+func payloadFor(n model.Notification, operator, buttons bool) pushPayload {
 	body := n.Subtitle
 	if n.Body != "" {
 		body = strings.TrimSpace(body + "\n" + n.Body)
 	}
-	body = clip(body, 400)
-	if n.AskID != "" { // after clipping, so it's never the part cut off
-		body = strings.TrimSpace(body + "\nAnswer it on the machine running Pulse.")
-	}
-	p := pushPayload{Title: clip(n.Title, 120), Body: body, Level: n.Level, Tag: n.RunID}
+	p := pushPayload{Title: clip(n.Title, 120), Body: clip(body, 400), Level: n.Level, Tag: n.RunID}
 	if n.RunID != "" {
 		p.URL = "/r/" + n.RunID
+	}
+	if n.AskID == "" {
+		return p
+	}
+	hint := "Answer it on the machine running Pulse."
+	switch {
+	case operator && buttons && len(n.AskOptions) >= 1 && len(n.AskOptions) <= 2:
+		p.Ask = &pushAsk{ID: n.AskID, Options: n.AskOptions}
+		hint = "" // the buttons say it (where a browser shows none, tapping opens the question)
+	case operator && buttons:
+		hint = "Open Pulse to answer."
+	}
+	if hint != "" { // after clipping, so it's never the part cut off
+		p.Body = strings.TrimSpace(p.Body + "\n" + hint)
 	}
 	return p
 }
 
+// encodePayload marshals p, shortening the body until it fits one push.
+func encodePayload(p pushPayload) []byte {
+	b, _ := json.Marshal(p)
+	for _, n := range []int{200, 80, 0} {
+		if len(b) <= webpush.MaxPayload {
+			break
+		}
+		p.Body = clip(p.Body, n)
+		p.Title = clip(p.Title, 60)
+		b, _ = json.Marshal(p)
+	}
+	return b
+}
+
 // deliver sends m to targets, dropping subscriptions that are gone.
 func (p *pusher) deliver(targets []pushSub, m webpush.Message, subject string) (sent int) {
+	return p.deliverEach(targets, func(pushSub) webpush.Message { return m }, subject)
+}
+
+// deliverEach sends each target its own message.
+func (p *pusher) deliverEach(targets []pushSub, msg func(pushSub) webpush.Message, subject string) (sent int) {
 	for _, t := range targets {
+		m := msg(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		var err error
 		if p.send != nil {
@@ -236,13 +277,21 @@ func (pn pushNotifier) Notify(n model.Notification) {
 	if len(targets) == 0 {
 		return
 	}
-	b, _ := json.Marshal(payloadFor(n))
 	urgent := n.Level == "error" || n.AskID != ""
 	topic := ""
-	if n.RunID != "" && len(n.RunID) <= 32 {
-		topic = n.RunID // a newer notice about a run replaces an undelivered older one
+	if n.RunID != "" && len(n.RunID) <= 32 && n.AskID == "" {
+		topic = n.RunID // a newer notice about a run replaces an undelivered older one (never a question)
 	}
-	go p.deliver(targets, webpush.Message{Payload: b, TTL: 24 * time.Hour, Urgent: urgent, Topic: topic}, s.publicURL())
+	buttons := true
+	if n.AskID != "" {
+		if a, ok := s.eng.GetAsk(n.AskID); ok && anyShell(a) {
+			buttons = false
+		}
+	}
+	go p.deliverEach(targets, func(t pushSub) webpush.Message {
+		b := encodePayload(payloadFor(n, wa.operators[t.Email], buttons))
+		return webpush.Message{Payload: b, TTL: 24 * time.Hour, Urgent: urgent, Topic: topic}
+	}, s.publicURL())
 }
 
 func (s *Server) pushes() *pusher {

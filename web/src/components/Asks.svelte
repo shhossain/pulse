@@ -26,7 +26,7 @@
     <div class="q">{a.question}</div>
     {#if a.context}<div class="ctx">{a.context}</div>{/if}
     {#if readOnly}
-      <div class="ctx">Answer it on the machine running Pulse{a.options?.length ? `: ${a.options.join(' / ')}` : ''}.</div>
+      <div class="ctx">View only: answering needs an operator{a.options?.length ? ` (${a.options.join(' / ')})` : ''}.</div>
     {:else if a.options?.length}
       <div class="opts">
         {#each a.options as o, i (o)}

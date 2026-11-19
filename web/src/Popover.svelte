@@ -21,7 +21,7 @@
 
 <main>
   <header>
-    <span class="title">Pulse{#if session.readOnly}<span class="ro" title={session.email}> · view only</span>{/if}</span>
+    <span class="title">Pulse{#if session.remote && session.readOnly}<span class="ro" title={session.email}> · view only</span>{/if}</span>
     <span class="status">
       {#if live.ended}
         Session ended

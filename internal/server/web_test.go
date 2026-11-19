@@ -11,9 +11,13 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"pulse/internal/model"
 )
 
 const (
@@ -201,5 +205,130 @@ func TestViewerStreamEndsWhenAccessEnds(t *testing.T) {
 	case <-ended:
 	case <-time.After(2 * time.Second):
 		t.Fatal("a viewer kept streaming after the web UI was turned off")
+	}
+}
+
+func TestOperatorsActViewersCannot(t *testing.T) {
+	t.Setenv("PULSE_HOME", t.TempDir())
+	s, remote, a := webServer(t)
+	cfg, _ := validWeb(WebConfig{Team: testTeam, AUD: testAUD, Emails: []string{"viewer@example.com"}, Operators: []string{"Op@Example.com"}})
+	wa := newWebAccess(cfg)
+	wa.v.CertsURL = s.web.v.CertsURL
+	s.mu.Lock()
+	s.web = wa
+	s.mu.Unlock()
+	if !wa.emails["op@example.com"] || len(cfg.Operators) != 1 {
+		t.Fatalf("operators must also be able to look: %+v", cfg)
+	}
+	op := a.token(t, "op@example.com", "")
+	viewer := a.token(t, "viewer@example.com", "")
+	post := func(path, tok, body string, origin bool) int {
+		hdr := []string{"Cf-Access-Jwt-Assertion", tok}
+		if origin {
+			hdr = append(hdr, "Origin", testURL)
+		}
+		return do(t, "POST", remote.URL+path, "", body, hdr...).StatusCode
+	}
+
+	run, _ := s.eng.Push("train", map[string]any{"status": "running"}, false)
+	ask, err := s.eng.Ask(run.Run, "Deploy?", []string{"yes", "no"}, "no", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := post("/api/v1/asks/"+ask.ID+"/answer", viewer, `{"answer":"yes"}`, true); got != 403 {
+		t.Errorf("viewer answered: %d", got)
+	}
+	if got := post("/api/v1/asks/"+ask.ID+"/answer", op, `{"answer":"yes"}`, false); got != 403 {
+		t.Errorf("operator without Origin (not our page): %d", got)
+	}
+	if got := post("/api/v1/asks/"+ask.ID+"/answer", op, `{"answer":"yes","by":"someone-else"}`, true); got != 200 {
+		t.Fatalf("operator answer: %d", got)
+	}
+	if a, _ := s.eng.GetAsk(ask.ID); a.AnsweredBy != "web:op@example.com" || a.Answer != "yes" {
+		t.Errorf("answered %q by %q: must be the verified email, not what the browser says", a.Answer, a.AnsweredBy)
+	}
+	if got := post("/api/v1/runs/"+run.Run+"/stop", viewer, "", true); got != 403 {
+		t.Errorf("viewer stopped a run: %d", got)
+	}
+	if got := post("/api/v1/runs/"+run.Run+"/stop", op, "", true); got != 200 {
+		t.Errorf("operator stop: %d", got)
+	}
+	for _, path := range []string{"/api/v1/runs/" + run.Run + "/actions/deploy", "/api/v1/mute", "/api/v1/alerts", "/api/v1/tokens"} {
+		if got := post(path, op, "{}", true); got != 404 {
+			t.Errorf("operator reached %s: %d (shell actions and settings stay off the web)", path, got)
+		}
+	}
+	r := do(t, "GET", remote.URL+"/api/v1/session", "", "", "Cf-Access-Jwt-Assertion", op)
+	b, _ := io.ReadAll(r.Body)
+	if !strings.Contains(string(b), `"can_act":true`) {
+		t.Errorf("operator session: %s", b)
+	}
+}
+
+func TestAnswerButtonsOnlyForOperators(t *testing.T) {
+	n := model.Notification{Title: "deploy asks", Subtitle: "Deploy?", AskID: "q_1", AskOptions: []string{"yes", "no"}, RunID: "r_aaaaaaaaaaaa"}
+	if p := payloadFor(n, true, true); p.Ask == nil || p.Ask.ID != "q_1" || len(p.Ask.Options) != 2 {
+		t.Errorf("operator payload: %+v", p)
+	}
+	if p := payloadFor(n, false, true); p.Ask != nil {
+		t.Error("a viewer got answer buttons")
+	}
+	if p := payloadFor(n, true, false); p.Ask != nil || !strings.Contains(p.Body, "machine running Pulse") {
+		t.Errorf("an answer runs a shell action: no buttons, answer on the hub: %+v", p)
+	}
+	n.AskOptions = []string{"a", "b", "c"}
+	if p := payloadFor(n, true, true); p.Ask != nil || !strings.HasSuffix(p.Body, "Open Pulse to answer.") {
+		t.Errorf("three options (phones show two): no buttons, open the app: %+v", p)
+	}
+}
+
+// An alert rule can tie an answer to a shell action ("Yes=action:deploy").
+// Operators can answer from the web, but never that way.
+func TestWebAnswerNeverRunsAShellAction(t *testing.T) {
+	t.Setenv("PULSE_HOME", t.TempDir())
+	s, remote, a := webServer(t)
+	cfg, _ := validWeb(WebConfig{Team: testTeam, AUD: testAUD, Operators: []string{"op@example.com"}})
+	wa := newWebAccess(cfg)
+	wa.v.CertsURL = s.web.v.CertsURL
+	s.mu.Lock()
+	s.web = wa
+	s.mu.Unlock()
+	s.eng.Push("train", map[string]any{"status": "running"}, false)
+	marker := filepath.Join(t.TempDir(), "deployed")
+	if r := do(t, "POST", s.URL()+"/api/v1/actions?job=train", adminTok, `{"name":"deploy","shell":"touch `+marker+`"}`); r.StatusCode != 200 {
+		b, _ := io.ReadAll(r.Body)
+		t.Fatalf("add action: %d %s", r.StatusCode, b)
+	}
+	r := do(t, "POST", s.URL()+"/api/v1/alerts?job=train", adminTok,
+		`{"expr":"loss > 1","ask":"Deploy?","answers":["Yes=action:deploy","No"]}`)
+	if r.StatusCode != 200 {
+		b, _ := io.ReadAll(r.Body)
+		t.Fatalf("add rule: %d %s", r.StatusCode, b)
+	}
+	s.eng.Push("train", map[string]any{"loss": 2}, false)
+	var ask model.Ask
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if open := s.eng.OpenAsks(); len(open) > 0 {
+			ask = open[0]
+			break
+		}
+	}
+	if ask.ID == "" || ask.Then["Yes"] != "action:deploy" {
+		t.Fatalf("rule question not asked: %+v", ask)
+	}
+	op := a.token(t, "op@example.com", "")
+	answer := func(choice string) int {
+		return do(t, "POST", remote.URL+"/api/v1/asks/"+ask.ID+"/answer", "", `{"answer":"`+choice+`"}`,
+			"Cf-Access-Jwt-Assertion", op, "Origin", testURL).StatusCode
+	}
+	if got := answer("Yes"); got != 403 {
+		t.Fatalf("an answer that runs a shell action, from the web: %d", got)
+	}
+	if got := answer("No"); got != 200 {
+		t.Fatalf("a plain answer from the web: %d", got)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the shell action ran")
 	}
 }
