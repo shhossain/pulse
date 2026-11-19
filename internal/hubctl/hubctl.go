@@ -454,12 +454,80 @@ func Disconnect(ctx context.Context, c Config, cf *Cloudflare, run Runner, machi
 }
 
 // CloudflareTokenFile is where the API token is kept off macOS (0600).
-func CloudflareTokenFile() string { return filepath.Join(Dir(), "cloudflare-api-token") }
+func CloudflareTokenFile() string { return secretFile(keychainService, "pulse") }
+
+func secretFile(service, account string) string {
+	return filepath.Join(Dir(), "secrets", service+"-"+regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(account, "_"))
+}
+
+func useKeychain() bool { return runtime.GOOS == "darwin" && os.Getenv("PULSE_HUB_DIR") == "" }
+
+// SaveSecret keeps value under service/account: the macOS Keychain, else a
+// 0600 file. value must be a token ([A-Za-z0-9_-]), never quoted text.
+func SaveSecret(run Runner, service, account, value string) (where string, err error) {
+	value = strings.TrimSpace(value)
+	if !apiTokenRe.MatchString(value) || !nameRe.MatchString(service) || !nameRe.MatchString(account) {
+		return "", errors.New("that doesn't look like a token")
+	}
+	if useKeychain() {
+		// security -i reads its commands from stdin (not the terminal), so the
+		// secret never appears in a command line or a prompt.
+		cmd := fmt.Sprintf("add-generic-password -U -a %s -s %s -w \"%s\"\n", account, service, value)
+		if _, err := run(context.Background(), []byte(cmd), "security", "-i"); err != nil {
+			return "", err
+		}
+		if LoadSecret(run, service, account) != value {
+			return "", errors.New("the Keychain didn't keep it")
+		}
+		return "the macOS Keychain (" + service + ")", nil
+	}
+	return secretFile(service, account), writePrivate(secretFile(service, account), []byte(value+"\n"))
+}
+
+// LoadSecret reads it ("" if none).
+func LoadSecret(run Runner, service, account string) string {
+	if useKeychain() {
+		if out, err := run(context.Background(), nil, "security", "find-generic-password", "-a", account, "-s", service, "-w"); err == nil {
+			return strings.TrimSpace(string(out))
+		}
+		return ""
+	}
+	b, _ := os.ReadFile(secretFile(service, account))
+	return strings.TrimSpace(string(b))
+}
+
+// DeleteSecret forgets it.
+func DeleteSecret(run Runner, service, account string) {
+	if useKeychain() {
+		_, _ = run(context.Background(), nil, "security", "delete-generic-password", "-a", account, "-s", service)
+		return
+	}
+	_ = os.Remove(secretFile(service, account))
+}
+
+// SaveCloudflareToken stores the Cloudflare API token.
+func SaveCloudflareToken(run Runner, token string) (string, error) {
+	return SaveSecret(run, keychainService, "pulse", token)
+}
+
+// LoadCloudflareToken reads the API token ("" if none): PULSE_CLOUDFLARE_API_TOKEN,
+// the Keychain, or the file.
+func LoadCloudflareToken(run Runner) string {
+	if t := strings.TrimSpace(os.Getenv("PULSE_CLOUDFLARE_API_TOKEN")); t != "" {
+		return t
+	}
+	if t := LoadSecret(run, keychainService, "pulse"); t != "" {
+		return t
+	}
+	b, _ := os.ReadFile(filepath.Join(Dir(), "cloudflare-api-token")) // where v0.3.1 kept it off macOS
+	return strings.TrimSpace(string(b))
+}
 
 const keychainService = "pulse-cloudflare-api-token"
 
 var (
 	apiTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{20,200}$`)
+	nameRe     = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,200}$`) // Keychain service and account names
 	tokenIDRe  = regexp.MustCompile(`\bt_[0-9a-f]{8,}\b`)
 )
 
@@ -478,43 +546,4 @@ func lock() (func(), error) {
 		return nil, errors.New("another pulse hub command is running: try again when it's done")
 	}
 	return func() { f.Close() }, nil
-}
-
-// SaveCloudflareToken stores the API token: the macOS Keychain, else a 0600 file.
-func SaveCloudflareToken(run Runner, token string) (where string, err error) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", errors.New("empty token")
-	}
-	if runtime.GOOS == "darwin" && os.Getenv("PULSE_HUB_DIR") == "" {
-		// security -i reads its commands from stdin (not the terminal), so the
-		// token never appears in a command line or a prompt.
-		if !apiTokenRe.MatchString(token) {
-			return "", errors.New("that doesn't look like a Cloudflare API token")
-		}
-		cmd := fmt.Sprintf("add-generic-password -U -a pulse -s %s -w \"%s\"\n", keychainService, token)
-		if _, err := run(context.Background(), []byte(cmd), "security", "-i"); err != nil {
-			return "", err
-		}
-		if LoadCloudflareToken(run) != token {
-			return "", errors.New("the Keychain didn't keep the token")
-		}
-		return "the macOS Keychain (" + keychainService + ")", nil
-	}
-	return CloudflareTokenFile(), writePrivate(CloudflareTokenFile(), []byte(token+"\n"))
-}
-
-// LoadCloudflareToken reads the API token ("" if none): PULSE_CLOUDFLARE_API_TOKEN,
-// the Keychain, or the file.
-func LoadCloudflareToken(run Runner) string {
-	if t := strings.TrimSpace(os.Getenv("PULSE_CLOUDFLARE_API_TOKEN")); t != "" {
-		return t
-	}
-	if runtime.GOOS == "darwin" && os.Getenv("PULSE_HUB_DIR") == "" {
-		if out, err := run(context.Background(), nil, "security", "find-generic-password", "-a", "pulse", "-s", keychainService, "-w"); err == nil {
-			return strings.TrimSpace(string(out))
-		}
-	}
-	b, _ := os.ReadFile(CloudflareTokenFile())
-	return strings.TrimSpace(string(b))
 }

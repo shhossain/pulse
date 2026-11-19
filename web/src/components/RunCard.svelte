@@ -7,6 +7,8 @@
   import { act, copy, openPage, getJSON, session } from '../lib/live.svelte.js'
 
   let { run, now } = $props()
+  // A followed hub's run: shown here, acted on at the hub (↗ opens it there).
+  const canAct = $derived(!session.readOnly && !run.hub)
   let expanded = $state(false)
   let copied = $state(false)
 
@@ -31,7 +33,7 @@
   $effect(() => {
     run.updates
     const key = sparkKey
-    if (!key) return
+    if (!key || run.hub) return // a hub's series stay on the hub
     clearTimeout(timer)
     timer = setTimeout(async () => {
       lastFetch = Date.now()
@@ -63,16 +65,16 @@
 <div class="card {run.status}" class:attention onclick={() => (expanded = !expanded)}>
   <div class="head">
     <span class="dot" data-tip={statusTip(run)}></span>
-    <span class="name" data-tip={`${run.job}, run #${run.seq}. Click to expand; ↗ opens the full page.`}>{run.job}<span class="seq">#{run.seq}</span></span>
+    <span class="name" data-tip={`${run.job}, run #${run.seq}${run.hub ? ` on ${run.hub}` : ''}. Click to expand; ↗ opens the full page.`}>{run.job}<span class="seq">#{run.seq}</span>{#if run.hub}<span class="hubtag">hub</span>{/if}</span>
     <span class="when" data-tip={run.status === 'running' ? `Running for ${when}, since ${new Date(run.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : `Last update ${new Date(run.updated_at).toLocaleString()}`}>{run.stop_requested ? 'stopping…' : when}</span>
-    {#if run.status === 'running' && !session.readOnly}<span class="hover-only"><StopButton {run} compact /></span>{/if}
+    {#if run.status === 'running' && canAct}<span class="hover-only"><StopButton {run} compact /></span>{/if}
     <button class="open" data-tip="Open the run’s page: charts, log and actions" aria-label="Open details" onclick={open}>
       <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><path d="M3.5 1.5h6v6M9.5 1.5 1.5 9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
   </div>
 
   {#if run.asks?.length}
-    <Asks asks={run.asks} readOnly={session.readOnly} />
+    <Asks asks={run.asks} readOnly={!canAct} />
   {/if}
 
   {#if attention && run.status === 'lost'}
@@ -127,7 +129,7 @@
   {#if attention || expanded}
     <div class="actions">
       {#if run.cmd}<button data-tip="Copy the command that started this run, to run it again" onclick={copyCommand}>{copied ? 'Copied' : 'Copy command'}</button>{/if}
-      {#if attention && !session.readOnly}<button class="primary" data-tip="Mark as seen: clears the menu bar badge for this run" onclick={dismiss}>Dismiss</button>{/if}
+      {#if attention && canAct}<button class="primary" data-tip="Mark as seen: clears the menu bar badge for this run" onclick={dismiss}>Dismiss</button>{/if}
     </div>
   {/if}
 </div>
@@ -190,4 +192,8 @@
   .hover-only { opacity: 0; transition: opacity 0.15s; display: flex; }
   .card:hover .hover-only, .hover-only:focus-within { opacity: 1; }
   .open:hover { color: var(--blue); }
+  .hubtag {
+    margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); background: var(--track);
+  }
 </style>

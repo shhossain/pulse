@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"log"
@@ -39,5 +40,8 @@ func main() {
 		<-sigs
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.FollowHub(ctx) // a hub's runs next to this Mac's (pulse hub follow)
 	runUI(a.Eng, a.Srv, a.Notifier)
 }

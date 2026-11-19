@@ -332,3 +332,98 @@ func TestWebAnswerNeverRunsAShellAction(t *testing.T) {
 		t.Fatal("the shell action ran")
 	}
 }
+
+func TestServiceTokenViewers(t *testing.T) {
+	s, remote, a := webServer(t)
+	cfg, _ := validWeb(WebConfig{Team: testTeam, AUD: testAUD, Operators: []string{"op@example.com"},
+		Services: []string{"0123456789ABCDEF0123456789abcdef.access"}})
+	wa := newWebAccess(cfg)
+	wa.v.CertsURL = s.web.v.CertsURL
+	s.mu.Lock()
+	s.web = wa
+	s.mu.Unlock()
+	mac := a.token(t, "", "0123456789abcdef0123456789abcdef.access")
+	other := a.token(t, "", "ffffffffffffffffffffffffffffffff.access")
+	run, _ := s.eng.Push("train", map[string]any{"status": "running"}, false)
+	if r := do(t, "GET", remote.URL+"/api/v1/stream", "", "", "Cf-Access-Jwt-Assertion", mac); r.StatusCode != 200 {
+		t.Fatalf("listed service token, stream: %d", r.StatusCode)
+	} else {
+		r.Body.Close()
+	}
+	if r := do(t, "GET", remote.URL+"/api/v1/runs", "", "", "Cf-Access-Jwt-Assertion", other); r.StatusCode != 404 {
+		t.Errorf("unlisted service token viewed: %d", r.StatusCode)
+	}
+	if r := do(t, "POST", remote.URL+"/api/v1/runs/"+run.Run+"/stop", "", "", "Cf-Access-Jwt-Assertion", mac, "Origin", testURL); r.StatusCode != 403 {
+		t.Errorf("a service viewer stopped a run: %d", r.StatusCode)
+	}
+	for _, bad := range []string{"not-a-client-id", "0123.access", "0123456789abcdef0123456789abcdef"} {
+		if _, err := validWeb(WebConfig{Team: testTeam, AUD: testAUD, Emails: []string{"a@b.co"}, Services: []string{bad}}); err == nil {
+			t.Errorf("service %q accepted", bad)
+		}
+	}
+}
+
+func TestAddRemoveServiceKeepsTheRest(t *testing.T) {
+	t.Setenv("PULSE_HOME", t.TempDir())
+	s := start(t)
+	defer s.stopRemote()
+	do(t, "POST", s.URL()+"/api/v1/remote", adminTok, `{"enable":true,"addr":"127.0.0.1:0","public_url":"https://pulse.example.com"}`)
+	do(t, "POST", s.URL()+"/api/v1/remote/web", adminTok, `{"enable":true,"team":"`+testTeam+`","aud":"`+testAUD+`","operators":["op@example.com"]}`)
+	id := "0123456789abcdef0123456789abcdef.access"
+	if r := do(t, "POST", s.URL()+"/api/v1/remote/web", adminTok, `{"enable":true,"add_service":"`+id+`"}`); r.StatusCode != 200 {
+		b, _ := io.ReadAll(r.Body)
+		t.Fatalf("add service: %d %s", r.StatusCode, b)
+	}
+	c := loadRemote()
+	if c.Web == nil || len(c.Web.Services) != 1 || len(c.Web.Operators) != 1 || c.Web.Team != testTeam {
+		t.Fatalf("after adding a service: %+v", c.Web)
+	}
+	do(t, "POST", s.URL()+"/api/v1/remote/web", adminTok, `{"enable":true,"remove_service":"`+id+`"}`)
+	if c := loadRemote(); len(c.Web.Services) != 0 || len(c.Web.Operators) != 1 {
+		t.Fatalf("after removing it: %+v", c.Web)
+	}
+}
+
+func TestHubRunsShowLocallyNeverThroughATunnel(t *testing.T) {
+	s, remote, a := webServer(t)
+	var opened string
+	s.OpenURL = func(u string) error { opened = u; return nil }
+	s.eng.Push("local-job", map[string]any{"status": "running"}, false)
+	s.SetHubRuns([]model.Run{{ID: "r_hubhubhubhub", Job: "vm-train", Status: model.Running, Hub: "https://hub.example.com"}})
+
+	r := do(t, "GET", s.URL()+"/api/v1/runs?hub=1", adminTok, "")
+	b, _ := io.ReadAll(r.Body)
+	if !strings.Contains(string(b), "vm-train") || !strings.Contains(string(b), "local-job") {
+		t.Fatalf("asked for them, this machine should list both: %s", b)
+	}
+	r = do(t, "GET", s.URL()+"/api/v1/runs", adminTok, "")
+	b, _ = io.ReadAll(r.Body)
+	if strings.Contains(string(b), "vm-train") {
+		t.Fatal("scripts listing runs (to stop them, …) now get runs this machine can't act on")
+	}
+	r = do(t, "GET", remote.URL+"/api/v1/runs", "", "", "Cf-Access-Jwt-Assertion", a.token(t, "me@example.com", ""))
+	b, _ = io.ReadAll(r.Body)
+	if strings.Contains(string(b), "vm-train") {
+		t.Fatal("a followed hub's runs were passed on through this machine's tunnel")
+	}
+	if r := do(t, "POST", s.URL()+"/api/v1/ui/open?path=/r/r_hubhubhubhub", adminTok, ""); r.StatusCode != 200 || opened != "https://hub.example.com/r/r_hubhubhubhub" {
+		t.Fatalf("opening a hub run: %d %q", r.StatusCode, opened)
+	}
+	if err := openExternal("http://evil.example"); err == nil {
+		t.Error("opened a non-https page")
+	}
+}
+
+func TestReconfiguringTheWebUIKeepsFollowers(t *testing.T) {
+	t.Setenv("PULSE_HOME", t.TempDir())
+	s := start(t)
+	defer s.stopRemote()
+	do(t, "POST", s.URL()+"/api/v1/remote", adminTok, `{"enable":true,"addr":"127.0.0.1:0","public_url":"https://pulse.example.com"}`)
+	do(t, "POST", s.URL()+"/api/v1/remote/web", adminTok, `{"enable":true,"team":"`+testTeam+`","aud":"`+testAUD+`","operators":["op@example.com"]}`)
+	do(t, "POST", s.URL()+"/api/v1/remote/web", adminTok, `{"enable":true,"add_service":"0123456789abcdef0123456789abcdef.access"}`)
+	// Adding an email later, the usual way:
+	do(t, "POST", s.URL()+"/api/v1/remote/web", adminTok, `{"enable":true,"team":"`+testTeam+`","aud":"`+testAUD+`","operators":["op@example.com"],"emails":["new@example.com"]}`)
+	if c := loadRemote(); c.Web == nil || len(c.Web.Services) != 1 {
+		t.Fatalf("a following Mac was dropped: %+v", c.Web)
+	}
+}

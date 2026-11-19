@@ -49,6 +49,8 @@ type Server struct {
 	// OpenPage shows a UI page (e.g. "/r/<id>"). The app sets it to open a
 	// native window; by default the page opens in the browser.
 	OpenPage func(path string) error
+	// OpenURL opens an outside page (a followed hub's run) in the browser.
+	OpenURL func(u string) error
 	// Watches runs polled sources (nil: watching is unavailable).
 	Watches *watch.Manager
 	// Limits bound what each job token may do (see Limits).
@@ -75,6 +77,49 @@ type Server struct {
 	lim    *limiter
 	web    *webAccess // the web UI through the tunnel (nil: off); guarded by mu
 	pusher *pusher    // web push to viewers, loaded on first use; guarded by mu
+
+	hubRuns  []model.Run // a followed hub's runs (internal/follow); guarded by mu
+	onHubRun func()      // told when they change (the menubar)
+}
+
+// SetHubRuns replaces the followed hub's runs (nil: none to show).
+func (s *Server) SetHubRuns(runs []model.Run) {
+	s.mu.Lock()
+	s.hubRuns = runs
+	f := s.onHubRun
+	s.mu.Unlock()
+	s.broadcast()
+	if f != nil {
+		f()
+	}
+}
+
+// OnHubRuns registers f to be told when the followed hub's runs change.
+func (s *Server) OnHubRuns(f func()) {
+	s.mu.Lock()
+	s.onHubRun = f
+	s.mu.Unlock()
+}
+
+// Snapshot is what this machine's UI shows: its own runs, then a followed hub's.
+func (s *Server) Snapshot(includeHidden ...bool) []model.Run {
+	runs := s.eng.Snapshot(includeHidden...)
+	s.mu.Lock()
+	hub := s.hubRuns
+	s.mu.Unlock()
+	return append(runs, hub...)
+}
+
+// hubRun returns a followed hub's run by id.
+func (s *Server) hubRun(id string) (model.Run, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.hubRuns {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return model.Run{}, false
 }
 
 func New(eng *engine.Engine, pushToken, adminToken string) *Server {
@@ -97,8 +142,23 @@ func New(eng *engine.Engine, pushToken, adminToken string) *Server {
 		}
 	}
 	s.OpenPage = s.openInBrowser
+	s.OpenURL = openExternal
 	eng.OnChange(s.broadcast)
 	return s
+}
+
+// openExternal opens an https URL in the default browser.
+func openExternal(u string) error {
+	if !strings.HasPrefix(u, "https://") {
+		return errors.New("only https pages open outside Pulse")
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", u).Run()
+	case "linux":
+		return exec.Command("xdg-open", u).Run()
+	}
+	return errors.New("no browser opener on this OS")
 }
 
 func (s *Server) openInBrowser(path string) error {
@@ -437,7 +497,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	send := func() error {
-		b, err := json.Marshal(map[string]any{"runs": s.eng.Snapshot()})
+		runs := s.eng.Snapshot()
+		if viewerEmail(r) == "" { // this machine's UI: with a followed hub's runs (never re-shared through a tunnel)
+			runs = s.Snapshot()
+		}
+		b, err := json.Marshal(map[string]any{"runs": runs})
 		if err != nil {
 			return err
 		}
@@ -614,7 +678,13 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	all := r.URL.Query().Get("all") == "1"
-	writeJSON(w, map[string]any{"runs": s.eng.Snapshot(all), "now": time.Now()})
+	runs := s.eng.Snapshot(all)
+	// A followed hub's runs only when asked (?hub=1): scripts listing runs to
+	// act on them get this machine's own, as before. Never through a tunnel.
+	if viewerEmail(r) == "" && r.URL.Query().Get("hub") == "1" {
+		runs = s.Snapshot(all)
+	}
+	writeJSON(w, map[string]any{"runs": runs, "now": time.Now()})
 }
 
 func (s *Server) getSeries(w http.ResponseWriter, r *http.Request) {
@@ -684,6 +754,14 @@ func (s *Server) uiOpen(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if id, ok := strings.CutPrefix(path, "/r/"); ok {
+		if hr, isHub := s.hubRun(id); isHub { // a hub's run: its page is on the hub
+			if err := s.OpenURL(hr.Hub + "/r/" + url.PathEscape(id)); err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, map[string]bool{"ok": true})
+			return
+		}
 		if _, found := s.eng.Run(id); !found {
 			writeErr(w, http.StatusNotFound, "no such run")
 			return

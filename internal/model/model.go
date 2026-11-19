@@ -200,6 +200,7 @@ type Chart struct {
 // Run is one execution of a job.
 type Run struct {
 	ID        string     `json:"id"`
+	Hub       string     `json:"hub,omitempty"` // set on runs shown from a followed hub: its URL
 	Job       string     `json:"job"`
 	Seq       int        `json:"seq"`
 	Status    Status     `json:"status"`
